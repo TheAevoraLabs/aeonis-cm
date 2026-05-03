@@ -1,56 +1,41 @@
-# gradle
-
+# Gradle
 .gradle/
-build/
-out/
-classes/
+**/build/
+**/out/
+**/classes/
+**/bin/
+.gradle-user/
 
-# eclipse
-
-*.launch
-
-# idea
-
+# IDEs
 .idea/
 *.iml
 *.ipr
 *.iws
-
-# vscode
-
-.settings/
 .vscode/
-bin/
+.settings/
 .classpath
 .project
+*.launch
 
-# macos
+# Minecraft Modding / Decompilation
+**/run/
+**/temp/
+**/temp-sources/
+**/temp-client-sources/
+**/loom-cache/
+**/*.sources/
+**/*sources.zip
+Common_ClientSources/
+.dump/
+.trash/
+.kotlin/
+mappings/
 
-*.DS_Store
-
-# fabric
-
-run/
-temp-sources/
-loom-cache/
-
-# java
-
-hs_err_*.log
-replay_*.log
+# Logs and Dumps
+*.log
 *.hprof
 *.jfr
 
-# vanilla source dumps / decompilation artifacts
-26.2_snapshot3_client.sources/
-src_mc26.2_snap5_clientsource/
-temp-client-sources/
-temp-sources/
-temp/
-.dump/
-.gradle-user/
-.kotlin/
-.trash/
-*.sources/
-*sources.zip
-
+# OS
+.DS_Store
+Thumbs.db
