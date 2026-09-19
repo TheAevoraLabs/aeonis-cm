@@ -1,7 +1,7 @@
 {
   "required": true,
   "package": "com.qc.aeonis.mixin.client",
-  "compatibilityLevel": "JAVA_21",
+  "compatibilityLevel": "JAVA_25",
   "client": [
     "WindowTitleMixin",
     "PlayerRendererMixin",
@@ -13,7 +13,6 @@
     "InGameOverlayRendererMixin",
     "MinecraftPickMixin",
     "CameraZoomMixin",
-    "ExampleClientMixin",
     "ClientCollisionMixin",
     "CameraMixin",
     "AncardFogMixin"
