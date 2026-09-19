@@ -223,19 +223,33 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
                 // Priority 2: Rhistel Whistle Ping Override
                 buildRhistelPingSubtree(),
 
-                // Priority 3: Tactical Combat Support with Stratum Occlusion
+                // Priority 3: Autonomous Skills (Hunting & Feeding, Vacuum Scavenger, Crafting, Building)
+                buildSkillsSubtree(),
+
+                // Priority 4: Tactical Combat Support with Stratum Occlusion
                 buildCombatSubtree(),
 
-                // Priority 4: Player Intent Synergy (Mining Support, Torch Placement, Vacuum Drops)
+                // Priority 5: Player Intent Synergy (Mining Support, Torch Placement)
                 buildIntentSynergySubtree(),
 
-                // Priority 5: Follow Owner with Dynamic Parkour
+                // Priority 6: Follow Owner with Dynamic Parkour
                 buildFollowOwnerSubtree(),
 
-                // Priority 6: Idle Standby & Guard
+                // Priority 7: Idle Standby & Guard
                 buildIdleSubtree()
             )
         )
+    }
+
+    private fun buildSkillsSubtree(): BTNode {
+        return ActionNode("ExecuteAutonomousSkills") { bb ->
+            val result = bb.bot.skillManager.tick()
+            when (result.status) {
+                com.qc.aeonis.companion.skill.SkillStatus.SUCCESS -> BTStatus.SUCCESS
+                com.qc.aeonis.companion.skill.SkillStatus.RUNNING -> BTStatus.RUNNING
+                else -> BTStatus.FAILURE
+            }
+        }
     }
 
     private fun buildEmergencySubtree(): BTNode {

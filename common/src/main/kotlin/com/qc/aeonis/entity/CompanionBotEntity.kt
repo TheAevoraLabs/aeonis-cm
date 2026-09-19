@@ -85,6 +85,7 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
     val inventory = CompanionInventory()
     private var surrogate: CompanionPlayerSurrogate? = null
     var brainTree: CompanionBehaviorTree? = null
+    val skillManager = com.qc.aeonis.companion.skill.CompanionSkillManager(this)
 
     fun getOrCreateSurrogate(): CompanionPlayerSurrogate? {
         val serverLevel = level() as? ServerLevel ?: return null
@@ -118,12 +119,8 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
         goalSelector.addGoal(1, CompanionEmergencyTeleportGoal(this))
         goalSelector.addGoal(2, CompanionEvadeDangerGoal(this))
         goalSelector.addGoal(3, CompanionForcedModeGoal(this))
-        goalSelector.addGoal(4, CompanionSmartCombatGoal(this))
-        goalSelector.addGoal(5, CompanionFollowOwnerGoal(this, 1.2, 8.0f, 3.0f))
-        goalSelector.addGoal(6, CompanionGatherDropsGoal(this))
-        goalSelector.addGoal(7, WaterAvoidingRandomStrollGoal(this, 1.0))
-        goalSelector.addGoal(8, LookAtPlayerGoal(this, Player::class.java, 8.0f))
-        goalSelector.addGoal(9, RandomLookAroundGoal(this))
+        goalSelector.addGoal(6, LookAtPlayerGoal(this, Player::class.java, 8.0f))
+        goalSelector.addGoal(7, RandomLookAroundGoal(this))
 
         targetSelector.addGoal(1, HurtByTargetGoal(this))
         targetSelector.addGoal(2, CompanionOwnerTargetGoal(this))
