@@ -11,16 +11,46 @@ import net.minecraft.world.item.ItemStack
 
 object CompanionCommands {
     fun register(dispatcher: CommandDispatcher<CommandSourceStack>) {
-        dispatcher.register(
-            Commands.literal("companion")
+        val root = Commands.literal("companion")
+            .requires { it.player != null }
+            .then(Commands.literal("spawn").executes { spawn(it) })
+            .then(Commands.literal("comehere").executes { comeHere(it) })
+            .then(Commands.literal("stats").executes { stats(it) })
+            .then(Commands.literal("dismiss").executes { dismiss(it) })
+            .then(Commands.literal("gui").executes { openGui(it) })
+            .then(Commands.literal("mode")
+                .then(Commands.literal("follow").executes { setMode(it, com.qc.aeonis.entity.CompanionBotEntity.ForcedMode.FOLLOW) })
+                .then(Commands.literal("attack").executes { setMode(it, com.qc.aeonis.entity.CompanionBotEntity.ForcedMode.ATTACK) })
+                .then(Commands.literal("retreat").executes { setMode(it, com.qc.aeonis.entity.CompanionBotEntity.ForcedMode.RUN_AWAY) })
+                .then(Commands.literal("idle").executes { setMode(it, com.qc.aeonis.entity.CompanionBotEntity.ForcedMode.NONE) })
+            )
+            .executes { help(it) }
 
-                .requires { it.player != null }
-                .then(Commands.literal("spawn").executes { spawn(it) })
-                .then(Commands.literal("comehere").executes { comeHere(it) })
-                .then(Commands.literal("stats").executes { stats(it) })
-                .then(Commands.literal("dismiss").executes { dismiss(it) })
-                .executes { help(it) }
-        )
+        val node = dispatcher.register(root)
+        dispatcher.register(Commands.literal("comp").redirect(node))
+    }
+
+    private fun setMode(ctx: CommandContext<CommandSourceStack>, mode: com.qc.aeonis.entity.CompanionBotEntity.ForcedMode): Int {
+        val player = ctx.source.playerOrException as ServerPlayer
+        val bot = CompanionBotManager.getBot(player)
+        if (bot == null) {
+            player.sendSystemMessage(Component.literal("§c[Companion] §7No helper bot found. Use /comp spawn."))
+            return 0
+        }
+        bot.forcedMode = mode
+        player.sendSystemMessage(Component.literal("§6[Rhistel] §7Companion mode updated to §e${mode.name}§7."))
+        return 1
+    }
+
+    private fun openGui(ctx: CommandContext<CommandSourceStack>): Int {
+        val player = ctx.source.playerOrException as ServerPlayer
+        val bot = CompanionBotManager.getBot(player)
+        if (bot == null) {
+            player.sendSystemMessage(Component.literal("§c[Companion] §7No helper bot found. Use /comp spawn."))
+            return 0
+        }
+        bot.openCustomInventory(player)
+        return 1
     }
 
     private fun spawn(ctx: CommandContext<CommandSourceStack>): Int {
