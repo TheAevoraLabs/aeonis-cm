@@ -31,6 +31,12 @@ Common_ClientSources/
 .kotlin/
 mappings/
 
+# Tooling
+.freebuff/
+
+# Data generator cache
+**/src/generated/.cache/
+
 # Logs and Dumps
 *.log
 *.hprof

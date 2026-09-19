@@ -1,0 +1,51 @@
+# NeoForge mod metadata for Aeonis.
+# Copyright (C) 2025-2026 Aevora Labs -- SPDX-License-Identifier: GPL-3.0-or-later
+
+license="${mod_license}"
+issueTrackerURL="https://github.com/TheAevoraLabs/aeonis-cm/issues"
+
+[[mods]]
+modId="${mod_id}"
+
+# Aeonis ships Kotlin sources, so it is loaded through the Kotlin language provider.
+modLoader="kotlinfml"
+loaderVersion="[5,)"
+
+version="${mod_version}"
+displayName="${mod_name}"
+displayURL="https://aeonis.prenxy.app"
+logoFile="assets/aeonis-manager/icon.png"
+authors="Aevora Labs"
+credits="Aevora Labs"
+description='''
+Aeonis is a gameplay and world-content mod for Minecraft, available for both Fabric and NeoForge. It provides player and mob transformation, AI-assisted command and control systems, custom dimensions and progression hooks, unique animated mobs, and supporting rendering and utility tooling.
+'''
+
+[[mixins]]
+config="aeonis.mixins.json"
+
+[[dependencies.${mod_id}]]
+modId="neoforge"
+type="required"
+versionRange="[${neo_version},)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="minecraft"
+type="required"
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="BOTH"
+
+# NOTE: KotlinForForge does not yet declare support for Minecraft 26.3. Upstream's
+# 6.x branch sets `unsupported_mc_version = 26.3` and the newest published build
+# (6.3.0a) declares a Minecraft dependency range of "[1.21.9,26.3)". The NeoForge
+# jar therefore builds but cannot load on 26.3 until KFF publishes a 26.3 build.
+# See TODO.md ("Known limitations").
+[[dependencies.${mod_id}]]
+modId="kotlinforforge"
+type="required"
+versionRange="[6.3.0,)"
+ordering="NONE"
+side="BOTH"

@@ -1,0 +1,42 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id "org.jetbrains.kotlin.jvm"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = "${project.archives_base_name}-common"
+}
+
+loom {
+    noIntermediateMappings()
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc:fabric-language-kotlin:${project.fabric_kotlin_version}"
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).all {
+	kotlinOptions {
+		jvmTarget = 25
+	}
+}
+
+processResources {
+	// Disable legacy datapack content that currently fails registry loading on 26.1.
+	exclude("data/aeonis/worldgen/**")
+	exclude("data/aeonis/dimension/**")
+	exclude("data/aeonis/dimension_type/**")
+	exclude("data/aeonis/tags/worldgen/**")
+	exclude("data/aeonis/tags/item/tungsten_tool_materials.json")
+	exclude("data/deeper_dark/**")
+	exclude("data/minecraft/tags/worldgen/biome/stronghold_biased_to.json")
+	exclude("data/minecraft/tags/worldgen/biome/has_structure/stronghold.json")
+	exclude("data/minecraft/tags/worldgen/biome/has_structure/end_city.json")
+	exclude("data/minecraft/tags/worldgen/biome/has_structure/ancient_city.json")
+}
