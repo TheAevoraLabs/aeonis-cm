@@ -1,6 +1,14 @@
 package com.qc.aeonis
 
 import com.qc.aeonis.network.AeonisNetwork
+import com.qc.aeonis.network.MobControlPayload
+import com.qc.aeonis.transform.AbilitySlot
+import com.qc.aeonis.transform.CamouflageLevel
+import com.qc.aeonis.transform.MobAbilityRuntime
+import com.qc.aeonis.transform.MobCamouflage
+import com.qc.aeonis.transform.MobMovementController
+import com.qc.aeonis.transform.MobMovementProfiles
+import com.qc.aeonis.transform.MovementKind
 import com.qc.aeonis.transform.TransformSessions
 import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerPlayer
@@ -9,6 +17,7 @@ import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.Mob
 import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.level.GameType
+import java.util.UUID
 
 /**
  * Per-tick movement and appearance sync between a controlling player and the mob they occupy.
@@ -16,8 +25,21 @@ import net.minecraft.world.level.GameType
  * Ownership and restore state are read from [AeonisNetwork] and [TransformSessions] rather than
  * from command-object maps, so this loop can no longer disagree with the transform lifecycle
  * about who is transformed or what their original gamemode was.
+ *
+ * Movement itself lives in [MobMovementController], which knows the locomotion style of each mob
+ * family; this class only decides *when* to drive, mirrors state onto the player, and routes
+ * ability presses.
  */
 object TransformationManager {
+
+    /**
+     * The exact payload object an ability was last dispatched from.
+     *
+     * Payloads arrive once per client tick and the server keeps the most recent one, so without
+     * this guard a dropped packet would re-fire the same ability every tick until the next input
+     * arrived. Comparing identity (not equality) is what makes it a one-shot trigger.
+     */
+    private val lastAbilityPayload = HashMap<UUID, MobControlPayload>()
 
     private fun controlledMob(player: ServerPlayer): Mob? {
         val entityId = AeonisNetwork.getControlledEntityId(player.uuid) ?: return null
@@ -25,58 +47,54 @@ object TransformationManager {
     }
 
     fun tickStart(server: MinecraftServer) {
+        // Cooldowns are per player, so one pass per tick is enough for every session.
+        MobAbilityRuntime.tick()
+
         for (player in server.playerList.players) {
             if (!AeonisNetwork.isPlayerTransformed(player.uuid)) continue
             val mob = controlledMob(player) ?: continue
             val input = AeonisNetwork.getLatestControlInput(player.uuid)
 
-            // The mob is driven by player input, never by its own navigator.
-            mob.navigation.stop()
-            mob.setSpeed(mob.getAttributeValue(Attributes.MOVEMENT_SPEED).toFloat())
-
             if (input == null) {
-                mob.setZza(0.0f)
-                mob.setXxa(0.0f)
-                mob.setYya(0.0f)
-                mob.setJumping(false)
+                // No input has arrived yet: hold still rather than running on stale keys.
+                MobMovementController.idle(mob)
                 continue
             }
 
-            val magnitude = kotlin.math.sqrt(input.forward * input.forward + input.strafe * input.strafe)
-            if (magnitude > 0.001f) {
-                mob.setZza(input.forward / magnitude)
-                mob.setXxa(input.strafe / magnitude)
-            } else {
-                mob.setZza(0.0f)
-                mob.setXxa(0.0f)
-            }
-            mob.setJumping(input.jump)
+            val sprinting = input.sprint && MobMovementProfiles.canSprint(mob)
+            MobMovementController.drive(mob, input, sprinting)
 
-            val vertical = when {
-                input.jump -> 1.0f
-                input.sneak -> -1.0f
-                else -> 0.0f
-            }
-            if (AeonisNetwork.canMobFly(mob)) {
-                mob.setYya(vertical)
-                // Flyers need their vertical velocity driven directly; setYya alone is ignored.
-                val currentY = mob.deltaMovement.y
-                val targetY = when {
-                    input.jump -> 0.34
-                    input.sneak -> -0.26
-                    else -> 0.0
-                }
-                val smoothedY = currentY + (targetY - currentY) * 0.32
-                mob.setDeltaMovement(
-                    mob.deltaMovement.x,
-                    smoothedY.coerceIn(-0.6, 0.6),
-                    mob.deltaMovement.z
-                )
-            } else if (mob.isInWater && mob.canBreatheUnderwater()) {
-                mob.setYya(vertical)
-            } else {
-                mob.setYya(0.0f)
-            }
+            // Identity suppression runs every tick because effects, tags and other mods can
+            // re-apply a glow or a visible name at any time.
+            MobCamouflage.apply(mob)
+            MobCamouflage.ambientChatter(mob, mob.tickCount, camouflageLevel(input))
+            MobCamouflage.mirrorPose(mob, input.sneak)
+
+            dispatchAbility(player, mob, input)
+        }
+    }
+
+    /**
+     * The player's requested camouflage level, clamped to a real level.
+     *
+     * The value arrives over the network, so it is treated as untrusted input: an out-of-range
+     * ordinal falls back to the default rather than throwing out of the tick loop.
+     */
+    private fun camouflageLevel(input: MobControlPayload?): CamouflageLevel =
+        CamouflageLevel.entries.getOrElse(input?.camouflage ?: -1) { CamouflageLevel.NATURAL }
+
+    private fun dispatchAbility(player: ServerPlayer, mob: Mob, input: MobControlPayload) {
+        if (input.ability == 0) {
+            lastAbilityPayload.remove(player.uuid)
+            return
+        }
+        if (lastAbilityPayload[player.uuid] === input) return
+        lastAbilityPayload[player.uuid] = input
+
+        val slot = AbilitySlot.of(input.ability) ?: return
+        val failure = MobAbilityRuntime.activate(player, mob, slot)
+        if (failure != null) {
+            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("§c[AEONIS] $failure"), true)
         }
     }
 
@@ -84,6 +102,7 @@ object TransformationManager {
         for (player in server.playerList.players) {
             if (!AeonisNetwork.isPlayerTransformed(player.uuid)) continue
             val mob = controlledMob(player) ?: continue
+            val input = AeonisNetwork.getLatestControlInput(player.uuid)
 
             // Mirror the mob's movement speed onto the player so their own movement feels right
             // when the session is later restored.
@@ -110,10 +129,20 @@ object TransformationManager {
             val previousYaw = mob.yRot
             val smoothedYaw = Mth.rotLerp(0.45f, previousYaw, player.yRot)
             mob.setYRot(smoothedYaw)
-            mob.setYHeadRot(smoothedYaw)
+            mob.yRotO = previousYaw
             mob.yBodyRot = Mth.rotLerp(0.35f, mob.yBodyRot, smoothedYaw)
             mob.setXRot(player.xRot)
-            mob.yRotO = previousYaw
+
+            // Camera-locked heads are the clearest tell that a mob is player-driven, so an idle
+            // mob is allowed to look around on its own.
+            val engaged = input != null && (
+                kotlin.math.abs(input.forward) > 0.05f ||
+                    kotlin.math.abs(input.strafe) > 0.05f ||
+                    input.jump
+                )
+            val camouflage = camouflageLevel(input)
+            MobCamouflage.idle(mob, engaged, mob.tickCount, camouflage)
+            MobCamouflage.settleBody(mob)
 
             // Mirror the player's equipment onto the mob so the model shows what they hold.
             for (slot in EQUIPMENT_SLOTS) {
@@ -131,7 +160,13 @@ object TransformationManager {
                 (mob.x - mob.xo) * (mob.x - mob.xo) +
                     (mob.z - mob.zo) * (mob.z - mob.zo)
             ).toFloat()
-            mob.walkAnimation.setSpeed((horizontalSpeed * 7.2f).coerceIn(0.0f, 2.6f))
+            // Ground walkers animate from distance travelled; flyers and swimmers read as
+            // motionless if the same formula is applied to them, so they get a milder curve.
+            val animationScale = when (MobMovementProfiles.profileFor(mob).kind) {
+                MovementKind.GROUND, MovementKind.CLIMBING, MovementKind.LEAPING -> 7.2f
+                else -> 4.0f
+            }
+            mob.walkAnimation.setSpeed((horizontalSpeed * animationScale).coerceIn(0.0f, 2.6f))
 
             player.setDeltaMovement(mob.deltaMovement.multiply(0.85, 1.0, 0.85))
 
@@ -153,6 +188,17 @@ object TransformationManager {
             player.isInvisible = true
             player.noPhysics = false
         }
+    }
+
+    /**
+     * Forgets per-session state for a player, used when their session ends.
+     *
+     * The one-shot ability guard and the idle-animation state both key off entity ids, so both
+     * have to be dropped together or a recycled id would resume somebody else's idle personality.
+     */
+    fun forgetAbilities(playerId: UUID, mobId: Int? = null) {
+        lastAbilityPayload.remove(playerId)
+        mobId?.let { MobCamouflage.forget(it) }
     }
 
     private val EQUIPMENT_SLOTS = arrayOf(

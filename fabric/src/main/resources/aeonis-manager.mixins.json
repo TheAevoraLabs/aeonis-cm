@@ -35,7 +35,6 @@
     "ControlledMobReplicationMixin",
     "ControlledSpiderClimbMixin",
     "ControlledMobEnvironmentalDamageMixin",
-    "ControlledSpecialMobAbilityMixin",
     "ControlledMobServerAiStepMixin",
     "ControlledAquaticBreathingMixin",
     "CreeperPowerMixin",

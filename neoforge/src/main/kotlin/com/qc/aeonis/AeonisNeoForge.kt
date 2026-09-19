@@ -29,6 +29,7 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent
 import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent
 import net.neoforged.neoforge.event.tick.ServerTickEvent
 import net.neoforged.neoforge.event.server.ServerStartingEvent
+import net.neoforged.neoforge.event.entity.player.PlayerEvent
 import net.neoforged.neoforge.event.server.ServerStoppingEvent
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent
 import net.neoforged.neoforge.network.registration.PayloadRegistrar
@@ -67,6 +68,9 @@ class AeonisNeoForge(bus: IEventBus) {
         NeoForge.EVENT_BUS.addListener(::onServerTickPost)
         NeoForge.EVENT_BUS.addListener(::onServerStarting)
         NeoForge.EVENT_BUS.addListener(::onServerStopping)
+        NeoForge.EVENT_BUS.addListener(::onPlayerLoggedIn)
+        NeoForge.EVENT_BUS.addListener(::onPlayerLoggedOut)
+        NeoForge.EVENT_BUS.addListener(::onPlayerRespawn)
         
         Aeonis.init()
         org.slf4j.LoggerFactory.getLogger("aeonis-neoforge").info("Aeonis NeoForge initialized successfully!")
@@ -146,10 +150,13 @@ class AeonisNeoForge(bus: IEventBus) {
     }
 
     private fun onRegisterKeyMappings(event: RegisterKeyMappingsEvent) {
-        event.register(AeonisKeyBindings.TELEPORT_KEY)
+        // Three ability keys, one per slot, matching the Fabric bindings exactly so the HUD and
+        // the manual say the same thing on both loaders.
         event.register(AeonisKeyBindings.POSSESS_KEY)
         event.register(AeonisKeyBindings.RELEASE_KEY)
-        event.register(AeonisKeyBindings.ABILITY_KEY)
+        event.register(AeonisKeyBindings.ABILITY_PRIMARY_KEY)
+        event.register(AeonisKeyBindings.ABILITY_SECONDARY_KEY)
+        event.register(AeonisKeyBindings.ABILITY_TERTIARY_KEY)
         event.register(AeonisKeyBindings.SOUL_POSSESS_KEY)
         event.register(AeonisKeyBindings.ZOOM_KEY)
         event.register(AeonisKeyBindings.FREECAM_TOGGLE_KEY)
@@ -168,12 +175,40 @@ class AeonisNeoForge(bus: IEventBus) {
     }
 
     private fun onServerStopping(event: ServerStoppingEvent) {
+        // Unwind every transform session before the world is saved. Without this a player who is
+        // mid-morph at shutdown is written to disk as a mob, and their restore snapshot is lost;
+        // the Fabric side has done this since the transform rework, NeoForge had not.
+        com.qc.aeonis.transform.TransformService.shutdown(event.server)
         AeonisAssistant.despawnAll()
         LlmConfigStorage.shutdown()
     }
 
     private fun onServerTickPre(event: ServerTickEvent.Pre) {
         com.qc.aeonis.TransformationManager.tickStart(event.server)
+    }
+
+    private fun onPlayerLoggedIn(event: PlayerEvent.PlayerLoggedInEvent) {
+        val player = event.entity as? net.minecraft.server.level.ServerPlayer ?: return
+        // A stale control entry from an unclean disconnect would otherwise leave the returning
+        // player invisible with no session to restore from.
+        com.qc.aeonis.network.AeonisNetwork.clearControlState(player.uuid)
+        event.entity.level().server?.let { server ->
+            server.execute {
+                com.qc.aeonis.network.AeonisNetwork.broadcastControllingPlayers(server)
+            }
+        }
+    }
+
+    private fun onPlayerLoggedOut(event: PlayerEvent.PlayerLoggedOutEvent) {
+        val player = event.entity as? net.minecraft.server.level.ServerPlayer ?: return
+        // The possessed mob is a real saved entity, so quitting mid-morph must discard it and
+        // restore the player before the disconnect is persisted.
+        com.qc.aeonis.transform.TransformService.handleQuit(player)
+    }
+
+    private fun onPlayerRespawn(event: PlayerEvent.PlayerRespawnEvent) {
+        val player = event.entity as? net.minecraft.server.level.ServerPlayer ?: return
+        com.qc.aeonis.transform.TransformService.handleRespawn(player)
     }
 
     private fun onServerTickPost(event: ServerTickEvent.Post) {
@@ -188,7 +223,10 @@ class AeonisNeoForge(bus: IEventBus) {
         com.qc.aeonis.dimension.AncardDimensionRules.tick(server)
         com.qc.aeonis.dimension.AncardEclipseEvent.tick(server)
         com.qc.aeonis.entity.HerobrineSpawner.tick(server)
-        
+
+        // Detects a possessed mob that died or unloaded and unwinds the session before the
+        // sync loop can act on a stale entity id.
+        com.qc.aeonis.transform.TransformService.tick(server)
         com.qc.aeonis.TransformationManager.tickEnd(server)
     }
 }

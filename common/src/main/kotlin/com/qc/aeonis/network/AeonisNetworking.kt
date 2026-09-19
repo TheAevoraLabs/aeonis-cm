@@ -70,6 +70,18 @@ object AeonisNetworking {
 
 // Top level payloads for direct usage
 
+/**
+ * One tick of player input for a possessed mob.
+ *
+ * [ability] carries the ability slot the player pressed this tick (see `AbilitySlot`): 0 means
+ * nothing was pressed, 1..3 select the primary/secondary/tertiary ability. [sprint] lets a form
+ * that can run do so without inventing a second packet for it.
+ *
+ * [camouflage] carries the player's `CamouflageLevel` ordinal, because how much idle behaviour a
+ * possessed body invents is a client preference but has to be executed on the server. Riding the
+ * movement packet means the setting takes effect within one tick of being changed and costs no
+ * extra traffic.
+ */
 data class MobControlPayload(
     val forward: Float,
     val strafe: Float,
@@ -78,7 +90,10 @@ data class MobControlPayload(
     val yaw: Float,
     val pitch: Float,
     val attack: Boolean,
-    val teleport: Boolean = false
+    val teleport: Boolean = false,
+    val ability: Int = 0,
+    val sprint: Boolean = false,
+    val camouflage: Int = 1
 ) : CustomPacketPayload {
     companion object {
         val ID = CustomPacketPayload.Type<MobControlPayload>(Identifier.fromNamespaceAndPath("aeonis", "mob_control"))
@@ -87,8 +102,16 @@ data class MobControlPayload(
                 buf.writeFloat(p.forward); buf.writeFloat(p.strafe); buf.writeBoolean(p.jump)
                 buf.writeBoolean(p.sneak); buf.writeFloat(p.yaw); buf.writeFloat(p.pitch)
                 buf.writeBoolean(p.attack); buf.writeBoolean(p.teleport)
+                buf.writeVarInt(p.ability); buf.writeBoolean(p.sprint)
+                buf.writeVarInt(p.camouflage)
             },
-            { buf -> MobControlPayload(buf.readFloat(), buf.readFloat(), buf.readBoolean(), buf.readBoolean(), buf.readFloat(), buf.readFloat(), buf.readBoolean(), buf.readBoolean()) }
+            { buf ->
+                MobControlPayload(
+                    buf.readFloat(), buf.readFloat(), buf.readBoolean(), buf.readBoolean(),
+                    buf.readFloat(), buf.readFloat(), buf.readBoolean(), buf.readBoolean(),
+                    buf.readVarInt(), buf.readBoolean(), buf.readVarInt()
+                )
+            }
         )
     }
     override fun type() = ID

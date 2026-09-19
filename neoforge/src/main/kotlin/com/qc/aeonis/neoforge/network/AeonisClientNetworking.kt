@@ -2,6 +2,7 @@ package com.qc.aeonis.neoforge.network
 
 import com.qc.aeonis.neoforge.client.AeonisKeyBindings
 import com.qc.aeonis.network.*
+import com.qc.aeonis.transform.AbilitySlot
 import net.minecraft.client.Minecraft
 import net.minecraft.network.chat.Component
 import java.util.UUID
@@ -11,7 +12,8 @@ object AeonisClientNetworking {
     private var controlledMobId: Int = -1
     private val controllingPlayerUUIDs = mutableSetOf<UUID>()
     private var wasAttacking = false
-    private var wasTeleporting = false
+    /** Ability slot requested this tick, consumed by the next movement packet. */
+    private var pendingAbility: Int = 0
     private var attackStartTime: Long = 0L
     private var attackTriggered = false
     private const val MELEE_CLICK_THRESHOLD_MS = 150L
@@ -26,10 +28,11 @@ object AeonisClientNetworking {
     private var controlledEntityName: String = ""
     private var isInSoulMode = false
 
-    private val TELEPORT_KEY get() = AeonisKeyBindings.TELEPORT_KEY
     private val POSSESS_KEY get() = AeonisKeyBindings.POSSESS_KEY
     private val RELEASE_KEY get() = AeonisKeyBindings.RELEASE_KEY
-    private val ABILITY_KEY get() = AeonisKeyBindings.ABILITY_KEY
+    private val ABILITY_PRIMARY_KEY get() = AeonisKeyBindings.ABILITY_PRIMARY_KEY
+    private val ABILITY_SECONDARY_KEY get() = AeonisKeyBindings.ABILITY_SECONDARY_KEY
+    private val ABILITY_TERTIARY_KEY get() = AeonisKeyBindings.ABILITY_TERTIARY_KEY
     private val SOUL_POSSESS_KEY get() = AeonisKeyBindings.SOUL_POSSESS_KEY
 
     fun isControlling(): Boolean = isControlling
@@ -90,8 +93,13 @@ object AeonisClientNetworking {
             resetInputState()
         }
 
-        if (mc.player != null && isControlling && ABILITY_KEY.consumeClick()) {
-            sendPacket(AbilityPayload())
+        // One key per ability slot; the index rides along with the next movement packet.
+        if (mc.player != null && isControlling) {
+            when {
+                ABILITY_PRIMARY_KEY.consumeClick() -> pendingAbility = AbilitySlot.PRIMARY.index
+                ABILITY_SECONDARY_KEY.consumeClick() -> pendingAbility = AbilitySlot.SECONDARY.index
+                ABILITY_TERTIARY_KEY.consumeClick() -> pendingAbility = AbilitySlot.TERTIARY.index
+            }
         }
 
         if (mc.player != null && isInSoulMode && SOUL_POSSESS_KEY.consumeClick()) {
@@ -142,11 +150,16 @@ object AeonisClientNetworking {
             isBreakingBlock = false
         }
         wasAttacking = attackKeyDown
-        
-        val teleport = TELEPORT_KEY.isDown && !wasTeleporting
-        wasTeleporting = TELEPORT_KEY.isDown
-        
-        sendPacket(MobControlPayload(forward, strafe, options.keyJump.isDown, options.keyShift.isDown, mc.player!!.yRot, mc.player!!.xRot, attack, teleport))
+
+        val sprint = options.keySprint.isDown && forward > 0f
+        sendPacket(
+            MobControlPayload(
+                forward, strafe, options.keyJump.isDown, options.keyShift.isDown,
+                mc.player!!.yRot, mc.player!!.xRot, attack,
+                teleport = false, ability = pendingAbility, sprint = sprint
+            )
+        )
+        pendingAbility = 0
     }
 
     private fun sendPacket(payload: net.minecraft.network.protocol.common.custom.CustomPacketPayload) {
@@ -155,7 +168,7 @@ object AeonisClientNetworking {
 
     private fun resetInputState() {
         wasAttacking = false
-        wasTeleporting = false
+        pendingAbility = 0
         attackStartTime = 0L
         attackTriggered = false
         isBreakingBlock = false

@@ -5,6 +5,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking
 import net.minecraft.client.Minecraft
 import net.minecraft.network.chat.Component
 import com.qc.aeonis.client.AeonisKeyBindings
+import com.qc.aeonis.transform.AbilitySlot
 
 object AeonisClientNetworking {
     
@@ -12,7 +13,17 @@ object AeonisClientNetworking {
     private var controlledMobId: Int = -1
     private val controllingPlayerUUIDs = mutableSetOf<java.util.UUID>()
     private var wasAttacking = false  // Track previous attack state to detect new clicks
-    private var wasTeleporting = false  // Track previous teleport state to detect new T press
+    /** Ability slot requested this tick, consumed by the next movement packet. */
+    private var pendingAbility: Int = 0
+
+    /**
+     * Optimistic cooldowns for the ability HUD, keyed by ability id.
+     *
+     * The authoritative cooldowns live on the server, which refuses an ability that is still
+     * recharging and says so. Mirroring the duration locally just keeps the HUD honest between
+     * presses without a packet per ability per tick.
+     */
+    private val abilityCooldowns = mutableMapOf<String, Int>()
     
     // Attack timing: distinguish short click (melee) vs long click (block breaking)
     private var attackStartTime: Long = 0L
@@ -39,10 +50,11 @@ object AeonisClientNetworking {
     // Soul mode (spectator mode with ability to possess existing mobs)
     private var isInSoulMode = false
 
-    private val TELEPORT_KEY get() = AeonisKeyBindings.TELEPORT_KEY
     private val POSSESS_KEY get() = AeonisKeyBindings.POSSESS_KEY
     private val RELEASE_KEY get() = AeonisKeyBindings.RELEASE_KEY
-    private val ABILITY_KEY get() = AeonisKeyBindings.ABILITY_KEY
+    private val ABILITY_PRIMARY_KEY get() = AeonisKeyBindings.ABILITY_PRIMARY_KEY
+    private val ABILITY_SECONDARY_KEY get() = AeonisKeyBindings.ABILITY_SECONDARY_KEY
+    private val ABILITY_TERTIARY_KEY get() = AeonisKeyBindings.ABILITY_TERTIARY_KEY
     private val SOUL_POSSESS_KEY get() = AeonisKeyBindings.SOUL_POSSESS_KEY
     
     fun register() {
@@ -145,8 +157,19 @@ object AeonisClientNetworking {
                 trackedBodyZ = 0.0
             }
 
-            if (client.player != null && isControlling && ABILITY_KEY.consumeClick()) {
-                ClientPlayNetworking.send(AbilityPayload())
+            // One key per ability slot. Pressing a slot sends the index with the next movement
+            // packet, and the server turns it into the mob's own action.
+            if (client.player != null && isControlling) {
+                when {
+                    ABILITY_PRIMARY_KEY.consumeClick() -> pendingAbility = AbilitySlot.PRIMARY.index
+                    ABILITY_SECONDARY_KEY.consumeClick() -> pendingAbility = AbilitySlot.SECONDARY.index
+                    ABILITY_TERTIARY_KEY.consumeClick() -> pendingAbility = AbilitySlot.TERTIARY.index
+                }
+                // Mirror the pressed ability's cooldown so the HUD reacts immediately.
+                if (pendingAbility != 0) {
+                    recordCooldown(AbilitySlot.of(pendingAbility))
+                }
+                tickCooldowns()
             }
             
             // Soul Possess key (P): when in soul mode, possess the mob you're looking at
@@ -221,6 +244,27 @@ object AeonisClientNetworking {
     fun setControlling(controlling: Boolean) {
         isControlling = controlling
     }
+
+    /** Remaining cooldown for an ability id, in ticks; 0 when it is ready. */
+    fun remainingCooldown(abilityId: String): Int = abilityCooldowns[abilityId] ?: 0
+
+    private fun tickCooldowns() {
+        if (abilityCooldowns.isEmpty()) return
+        val keys = abilityCooldowns.keys.toList()
+        for (key in keys) {
+            val remaining = abilityCooldowns.getValue(key) - 1
+            if (remaining <= 0) abilityCooldowns.remove(key) else abilityCooldowns[key] = remaining
+        }
+    }
+
+    private fun recordCooldown(slot: AbilitySlot?) {
+        val slotId = slot ?: return
+        val mc = Minecraft.getInstance()
+        val level = mc.level ?: return
+        val mob = level.getEntity(controlledMobId) as? net.minecraft.world.entity.Mob ?: return
+        val ability = com.qc.aeonis.transform.MobAbilities.forMob(mob).firstOrNull { it.slot == slotId } ?: return
+        abilityCooldowns[ability.id] = ability.cooldownTicks
+    }
     
     fun isControlling(): Boolean = isControlling
 
@@ -284,21 +328,29 @@ object AeonisClientNetworking {
         }
         wasAttacking = attackKeyDown
         
-        // Detect T key for teleport (Enderman ability)
-        val teleportKeyDown = TELEPORT_KEY.isDown
-        val teleport = teleportKeyDown && !wasTeleporting
-        wasTeleporting = teleportKeyDown
-        
+        // Sprint is forwarded so forms with the physique for it (and only those) can run.
+        val sprint = options.keySprint.isDown && forward > 0f
+
         // Send packet to server
-        val payload = MobControlPayload(forward, strafe, jump, sneak, yaw, pitch, attack, teleport)
+        // The camouflage level rides every movement packet: it is a client preference that the
+        // server has to execute, and one VarInt per tick is cheaper than a separate sync packet
+        // with its own lifecycle. Reading it here means a change in the menu takes effect on the
+        // very next tick with no reconnect.
+        val payload = MobControlPayload(
+            forward, strafe, jump, sneak, yaw, pitch, attack,
+            teleport = false, ability = pendingAbility, sprint = sprint,
+            camouflage = com.qc.aeonis.screen.AeonisClientSettings.camouflageLevel.ordinal
+        )
+        pendingAbility = 0
         ClientPlayNetworking.send(payload)
     }
 
     private fun resetInputState() {
         wasAttacking = false
-        wasTeleporting = false
+        pendingAbility = 0
         attackStartTime = 0L
         attackTriggered = false
         isBreakingBlock = false
+        abilityCooldowns.clear()
     }
 }

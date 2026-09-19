@@ -1,5 +1,6 @@
 package com.qc.aeonis.transform
 
+import com.qc.aeonis.TransformationManager
 import com.qc.aeonis.entity.AeonisEntities
 import com.qc.aeonis.network.AeonisNetwork
 import net.minecraft.network.chat.Component
@@ -107,6 +108,8 @@ object TransformService {
         // AI is suppressed for controlled mobs by the loader mixins, not by NoAI (which would
         // also freeze movement in 26.2+).
         current.setNoAi(false)
+        // Strip any name tag, glow marker or silence before the player ever sees the form.
+        MobCamouflage.apply(current)
         // `current` is reassigned by the variant callback, so it cannot be smart cast; the
         // dragon needs its own local for the phase lookup.
         (current as? EnderDragon)?.phaseManager?.setPhase(EnderDragonPhase.HOVERING)
@@ -168,6 +171,7 @@ object TransformService {
         val restore = SoulMode.leave(player.uuid) ?: PlayerRestoreState.capture(player)
 
         mob.setNoAi(false)
+        MobCamouflage.apply(mob)
         if (mob is EnderDragon) {
             mob.phaseManager.setPhase(EnderDragonPhase.HOVERING)
         }
@@ -240,6 +244,12 @@ object TransformService {
         // into the restored player.
         SoulMode.leave(player.uuid)
 
+        // Hand the mob back to normal physics before it is removed, so a mob that was given
+        // gravity-free flight does not leave a hovering entity behind in the world.
+        (mob as? Mob)?.let { MobMovementController.restore(it) }
+        TransformationManager.forgetAbilities(player.uuid, mob?.id)
+        MobAbilityRuntime.clear(player.uuid)
+
         restore.applyTo(player, healthOverride)
         mob?.discard()
 
@@ -277,6 +287,8 @@ object TransformService {
         player.level().getEntity(session.entityId)?.discard()
         AeonisNetwork.clearControlState(player.uuid)
         SoulMode.leave(player.uuid)
+        TransformationManager.forgetAbilities(player.uuid, session.entityId)
+        MobAbilityRuntime.clear(player.uuid)
         session.restore.applyTo(player)
     }
 
@@ -289,6 +301,8 @@ object TransformService {
             untransform(player, showMessage = false, teleportToMob = false, carryDamage = false)
         }
         SoulMode.leave(player.uuid)
+        TransformationManager.forgetAbilities(player.uuid)
+        MobAbilityRuntime.clear(player.uuid)
     }
 
     /**
@@ -316,6 +330,8 @@ object TransformService {
             AeonisNetwork.sendSoulModeStatus(player, false)
         }
         SoulMode.clear()
+        MobAbilityRuntime.clearAll()
+        MobCamouflage.clear()
     }
 
     // ------------------------------------------------------------------ inspection

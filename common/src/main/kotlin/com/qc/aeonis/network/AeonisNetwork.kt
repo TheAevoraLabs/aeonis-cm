@@ -68,15 +68,16 @@ object AeonisNetwork {
             .sendSoulModeStatus(player, enabled)
     }
 
+    /**
+     * True when the mob moves through the air under its own power.
+     *
+     * This used to be a hardcoded list of eight entity types that had drifted out of sync with
+     * the movement code (the Ender Dragon and the Breeze were missing). It now reads the answer
+     * from the locomotion profile, so there is one definition of "can this mob fly".
+     */
     fun canMobFly(mob: net.minecraft.world.entity.Mob): Boolean {
-        val type = mob.type
-        return type == net.minecraft.world.entity.EntityTypes.BAT ||
-               type == net.minecraft.world.entity.EntityTypes.BEE ||
-               type == net.minecraft.world.entity.EntityTypes.GHAST ||
-               type == net.minecraft.world.entity.EntityTypes.PARROT ||
-               type == net.minecraft.world.entity.EntityTypes.PHANTOM ||
-               type == net.minecraft.world.entity.EntityTypes.VEX ||
-               type == net.minecraft.world.entity.EntityTypes.WITHER ||
-               type == net.minecraft.world.entity.EntityTypes.ALLAY
+        val kind = com.qc.aeonis.transform.MobMovementProfiles.profileFor(mob).kind
+        return kind == com.qc.aeonis.transform.MovementKind.FLYING ||
+            kind == com.qc.aeonis.transform.MovementKind.HOVERING
     }
 }

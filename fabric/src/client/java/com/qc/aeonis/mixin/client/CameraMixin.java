@@ -100,10 +100,14 @@ public abstract class CameraMixin {
             }
             this.move(-(baseDistance * scale), 0, 0);
 
-            // Move camera further back for large mobs
-            float extraDistance = getExtraCameraDistance(mob);
-            if (extraDistance > 0) {
-                this.move(-extraDistance, 0, 0);
+            // Move camera further back for large mobs. Players who prefer a tight camera can
+            // turn this off from Options -> Aeonis; the setting is client-side because only the
+            // local player's view is affected.
+            if (com.qc.aeonis.screen.AeonisClientSettings.INSTANCE.getLargeFormCamera()) {
+                float extraDistance = getExtraCameraDistance(mob);
+                if (extraDistance > 0) {
+                    this.move(-extraDistance, 0, 0);
+                }
             }
             if (genericCube) {
                 float cubeBack = sulfurCube ? 3.4f : 2.6f;

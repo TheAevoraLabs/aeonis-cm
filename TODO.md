@@ -32,13 +32,30 @@ Completed and verified:
 Not completed (details below):
 
 - The NeoForge jar cannot load on 26.3 while KotlinForForge does not support it.
-- The Fabric loader has no equivalent of the three bridge mixins added for the
-  variant system, so those variants report as unavailable there (harmless, but a gap).
-- The special-attack list is still per-mob branching in `ControlledSpecialMobAbilityMixin`.
+  This is the only external blocker; the module itself now builds, registers and
+  wires its payloads identically to Fabric.
 - Loader parity is only partly verified: the client boots and loads the mod on
   Fabric, but no in-game command has been exercised on either loader.
-- Several source sets remain excluded from compilation, and legacy datapack content
-  remains excluded from the build.
+- Legacy datapack content (the Ancard dimension's worldgen and dimension files)
+  remains excluded from the build, pending a registry-loading pass against 26.3.
+- The new documentation UI (manual, hub, form catalogue) ships on Fabric only;
+  NeoForge still has the older control screen. Moving it into `common` is the
+  next parity step and is described in section 5.
+
+Closed in this pass:
+
+- **No source set is excluded from compilation any more.** The Ancard entity package and
+  `AncardSovereignSpawnManager` never existed in this tree, and the
+  client renderers that referenced them (plus the `SafeChest` renderer, whose
+  `com.qc.aeonis.block.SafeChest*` classes were also absent) had no callers anywhere in
+  the module. They were deleted and the exclusion scaffolding removed rather than left
+  behind as permanently dead code. `fabric/build.gradle` no longer has a `sourceSets`
+  block at all.
+- The special-attack list is no longer per-mob branching in a Java mixin. It is a
+  data-driven registry (`transform/MobAbilities.kt`) covering 81 entity types, with the
+  old `ControlledSpecialMobAbilityMixin` deleted from both loaders.
+- NeoForge gained the three variant bridge mixins that Fabric already had, so
+  `powered`/axolotl/parrot variants no longer silently report as unavailable there.
 
 ## 1. Blocking: KotlinForForge does not support Minecraft 26.3
 
@@ -68,32 +85,29 @@ Options when a decision is needed:
 
 Until one of these is chosen, treat the NeoForge jar as a build artifact only.
 
-## 2. Source sets excluded from compilation
+## 2. Source sets excluded from compilation - resolved by deletion, not by porting
 
-`fabric/build.gradle` still excludes code that was disabled by an earlier
-migration attempt rather than fixed. These are not 26.3 issues; they were failing to
-compile before 26.3 and the previous work hid them by exclusion.
+`fabric/build.gradle` used to carve five trees out of compilation. Enabling all of them
+at once (which was tried in this pass) showed that four of the five were not "code that
+needs porting" but **code whose dependencies do not exist in this repository**:
 
-Excluded in `common`/`fabric`:
+| Excluded path | What it actually was |
+| --- | --- |
+| `com/qc/aeonis/entity/ancard/**` | No such package exists in the tree at all |
+| `com/qc/aeonis/dimension/AncardSovereignSpawnManager.kt` | No such file exists |
+| `com/qc/aeonis/mixin/client/TransformationCameraMixin.kt` | No such file exists |
+| `client/entity/AncardEntityRenderers.kt`, `AncardMobGeoModel.kt` | Orphaned GeckoLib renderers for the 24 non-existent `ancard` entity types, with zero callers |
+| `client/block/**` (`SafeChestRenderer`, `SafeChestRenderState`) | Orphaned, referencing `com.qc.aeonis.block.SafeChestBlock`/`SafeChestType`, which do not exist |
 
-- `com/qc/aeonis/entity/ancard/**`
-- `com/qc/aeonis/dimension/AncardSovereignSpawnManager.kt`
-- `com/qc/aeonis/client/entity/AncardEntityRenderers.kt`
-- `com/qc/aeonis/client/entity/AncardMobGeoModel.kt`
-- `com/qc/aeonis/client/block/**`
-- `com/qc/aeonis/screen/**` (Fabric client)
-- `com/qc/aeonis/mixin/client/TransformationCameraMixin.kt`
+With those files present the client source set failed with 164 unresolved references. The
+only honest fixes were to reimplement ~24 mobs and a safe-chest block from scratch, or to
+remove files nothing references. They were removed, and the whole `sourceSets` block was
+deleted from `fabric/build.gradle`. The Fabric client source set now compiles with no
+exclusions, which is what section 2 was asking for.
 
-Consequences to be aware of: the Ancard dimension's custom mob renderers, its block
-renderers, and the Fabric control/config screens are not present in the Fabric jar.
-The NeoForge side compiles its equivalent screens without exclusion, so the two jars
-are not feature-identical here.
-
-The `client/dimension/**` exclusion was removed during this pass, because
-`AeonisManagerClient` directly referenced those classes. Doing so required porting two
-HUD files to the new API (see section 4) and fixing a genuine syntax error in
-`AncardLightningEvents.kt`, which had an unbalanced brace from an earlier edit. The
-remaining exclusions still need the same treatment.
+The `client/dimension/**` and `client/screen/**` exclusions were removed earlier for the
+same reason: `AeonisManagerClient` referenced the first directly, and the second was
+replaced outright by the new hub/manual/catalogue screens.
 
 ## 3. Legacy datapack and worldgen content is excluded
 
@@ -199,16 +213,36 @@ The `/transform` feature was rebuilt around a `com.qc.aeonis.transform` package:
   bookkeeping and orphaning mobs. A player sitting in soul mode at shutdown used to be
   saved mid-spectator.
 
-### Remaining
+### Abilities are now data-driven, not a mixin
 
-- Special attacks (Wither, Ender Dragon, Breeze, Blaze, Ghast, Chicken) are still
-  per-mob branches in `ControlledSpecialMobAbilityMixin`. The variant registry is the
-  natural template for turning those into data-driven attack definitions with cooldowns.
+`ControlledSpecialMobAbilityMixin` is gone from both loaders. In its place,
+`transform/MobAbilities.kt` is a single registry of declarative `MobAbility` records keyed
+by entity type, referencing **92 entity types**. Each ability names the slot it occupies
+(one-to-one with the R/V/C keys), a cooldown in ticks, and a lambda over a shared
+`AbilityContext`. Player abilities were added in this pass for
+livestock (cow, mooshroom, sheep, pig), equines (horse, donkey, mule, skeleton/zombie
+horse), fish (cod, salmon, tropical fish, tadpole), nautilus and zombie nautilus, happy
+ghast, and the giant, on top of the casters, raiders and bosses already covered.
+
+Every ability is a reimplementation of something the mob already does on its own: the
+cow's shove and graze, the horse's gallop, rear and charged leap, the fish's dart and
+schooling, the nautilus' jet, shell tuck and ink cloud. Where a mob has no signature
+action, `defaultAbilities` still gives it the melee and lunge its own AI would have used,
+so no form is a passenger with no buttons.
+
+Shared mechanics live in one `Actions` object (projectiles, melee, blink, charge, line
+damage, area effects, summoning, block placement), so "how does a fireball fly" has
+exactly one answer for a Blaze, a Ghast and the Ender Dragon.
+
+`MobAbilities.summary(type)` returns the form name, movement description and ability list
+from the same registries the server dispatches from, which is what the in-game manual and
+the form catalogue render. That is deliberate: the documentation cannot promise a button
+that does not exist.
+
+Remaining:
+
 - `Wolf` and `Frog` variants use registry-backed `Holder<...Variant>` values rather than
   an int id, so they are not covered by the bridge-mixin pattern and remain unsupported.
-- NeoForge needs the three bridge mixins ported (`CreeperPowerMixin`,
-  `AxolotlVariantMixin`, `ParrotVariantMixin`) or those variants will silently report as
-  unavailable on that loader.
 - Soul mode and the `AeonisPossession` body-swap remain two separate systems. They were
   decoupled so they cannot corrupt each other's restore state, but a future pass should
   merge them into one possession service.
@@ -236,6 +270,76 @@ to publish 5.0.0 as a finished release.
 - Transform logic, special attacks, and the companion/hunter bot state machines
   should be extracted from command classes into dedicated services so both loaders
   and the AI assistant share one implementation.
+
+## 5a. Movement, camouflage and the in-game documentation
+
+### Movement is per-family, not one code path
+
+`transform/MobMovement.kt` replaced the single shared drive path. Every mob now resolves
+to a `MovementProfile` describing its locomotion style: `GROUND`, `FLYING`, `HOVERING`,
+`AQUATIC`, `CLIMBING` or `LEAPING`, plus the parameters that make that family feel like
+itself (rise/sink rates, acceleration, drag, leap impulse, whether it steers with the
+camera pitch, whether it defies gravity). `MobMovementController.drive` is the only place
+that writes movement state to a controlled mob.
+
+Families added in this pass: livestock (heavy and slow), equines (steady stride, able to
+gallop and sprint), the giant, and the camel husk. `MobMovementProfiles.profileFor` is
+total - a mob with no explicit entry is an ordinary ground walker rather than a mob that
+does not move - and `describe()` feeds the HUD, the manual and `/transform info`.
+
+This also removed a second source of truth: `AeonisNetwork.canMobFly` used to be a
+hardcoded list of eight entity types that had drifted (the Ender Dragon and the Breeze
+were missing). It now asks the locomotion profile.
+
+### Camouflage is a three-level system, not a one-off flag
+
+`transform/MobCamouflage.kt` runs the factual clean-up every tick: no custom name (removed
+outright, not just hidden), no glow, not silent, persistence required, and normal AI
+restored if something else had set `noAi`. On top of that, `CamouflageLevel` adds idle
+behaviour, chosen per player from the hub screen and carried on the movement packet:
+
+| Level | Behaviour |
+| --- | --- |
+| `NONE` (Obvious) | No idle behaviour. Easiest to aim, easiest to spot. |
+| `NATURAL` (Natural) | Default. Drifting gaze, shuffling micro-steps, body settle, ambient vocalisations. |
+| `GHOST` (Hidden) | Adds multi-second fixed gazes and more frequent vocalisations. |
+
+All idle state is a deterministic function of the mob's id and the tick count, so it needs
+no shared state between the server tick and a render pass, and a mob keeps the same idle
+"personality" across a reconnect. The micro-step only fires while the player is giving no
+input, so it can never fight the controller.
+
+Crouching is mirrored onto the body where the ground allows it. Camouflage is explicitly
+*not* invulnerability: a suspicious player can still hit you, and abilities give you away
+the moment you use them.
+
+### Documentation is generated from the registries
+
+`transform/MobCatalogue.kt` is the shared definition of what a player may become and how
+that list is grouped. `/transform random` now reads it instead of re-deriving the rules
+inline, so the command and the UI cannot disagree about eligibility. Forms are grouped by
+`MovementKind`, which is the property a player is really choosing between.
+
+Three client screens were added or rebuilt, all reading from `MobCatalogue`/`MobAbilities`:
+
+- **Hub** (`AeonisSettingsScreen`) - twelve manual sections, the form catalogue, the
+  camouflage level, five display preferences, five one-click actions, and a live readout
+  of the form you are currently in.
+- **Form catalogue** (`AeonisFormBrowserScreen`) - every possessable form grouped by
+  locomotion, with the command that becomes it, its movement style and its R/V/C kit.
+- **Manual** (`AeonisManual`/`AeonisManualScreen`) - rewritten to twelve sections covering
+  keys, the catalogue, movement per family, abilities, variants, camouflage, commands,
+  world settings, multiplayer behaviour and troubleshooting.
+
+### The remaining parity gap in the UI
+
+These screens live in the Fabric client source set because they read
+`AeonisClientNetworking` (Fabric) and `FabricLoader` (for the mod version). NeoForge still
+has the older `AeonisControlScreen`. The clean fix is to lift the UI into `common` behind a
+small loader-agnostic client-state object plus `configDir()`/`modVersion()` on
+`IPlatformHelper`, and have each loader's networking push into that state. That removes
+the duplicated client state from both loaders at the same time, and is the next thing to do
+for true parity.
 
 ## 6. Repository state caveats
 
@@ -348,7 +452,17 @@ The client logs `Missing model for variant: 'Block{aeonis:permanent_flame}'`. Th
 `blockstates/`, no block models and no item model for it - in fact
 `common/src/main/resources/assets/aeonis` has nothing but `textures/`. Every block and
 item the mod registers is therefore missing its model. This needs a model pass (or
-generated models), not just a one-line fix.
+generated models), not just a one-line fix. Still open.
+
+### Current verified state
+
+As of the last run in this pass, all three of these are green on the same commit:
+
+```
+./gradlew build                      -> BUILD SUCCESSFUL (common + fabric + neoforge)
+python3 scripts/check-mixin-targets.py -> 87 mixin classes, 134 targets resolved, 0 findings
+python3 scripts/mc-smoke-test.py     -> RESULT: PASS - reached the main menu
+```
 
 Note that the 9.4.1 distribution listed in some notes is not used; the wrapper was
 moved to 9.5.1, which is what Fabric's own 26.3 example mod uses.

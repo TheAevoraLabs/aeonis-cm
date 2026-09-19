@@ -17,6 +17,7 @@ import com.qc.aeonis.entity.AeonisEntities
 import com.qc.aeonis.entity.HerobrineEntity
 import com.qc.aeonis.entity.HerobrineSpawner
 import com.qc.aeonis.network.AeonisNetwork
+import com.qc.aeonis.transform.MobCatalogue
 import com.qc.aeonis.transform.MobKinds
 import com.qc.aeonis.transform.MobVariants
 import com.qc.aeonis.transform.SoulMode
@@ -631,6 +632,8 @@ object AeonisCommands {
                     .then(Commands.literal("story")
                         .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
                         .executes { tellStory(it) }))
+                .then(Commands.literal("menu").executes { showMenuHint(it) })
+                .then(Commands.literal("diagnostics").executes { diagnostics(it) })
                 .then(Commands.literal("reload")
                     .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
                     .executes { reloadMod(it) })
@@ -1501,18 +1504,14 @@ object AeonisCommands {
     private fun forcePlayerTransform(target: ServerPlayer, entityType: EntityType<*>, variants: List<String> = emptyList()): Boolean =
         TransformService.replaceTransform(target, entityType, variants).isSuccess
 
-    private fun buildFunTransformPool(): List<EntityType<*>> {
-        return BuiltInRegistries.ENTITY_TYPE
-            .filter { type ->
-                type != EntityTypes.PLAYER &&
-                type != AeonisEntities.BODY.get() &&
-                type.canSummon() &&
-                type.category != MobCategory.MISC &&
-                !type.description.string.contains("Body", ignoreCase = true)
-            }
-            .shuffled()
-            .take(40)
-    }
+    /**
+     * A random handful of legal forms.
+     *
+     * The eligibility rules now live in [MobCatalogue], which the in-game form browser also
+     * reads, so the two can no longer disagree about what a player is allowed to become.
+     */
+    private fun buildFunTransformPool(): List<EntityType<*>> =
+        MobCatalogue.possessable().shuffled().take(40)
 
     private fun isCubeStyleMob(entity: Entity): Boolean = entity is Mob && MobKinds.isCubeStyle(entity)
     
@@ -1858,6 +1857,64 @@ object AeonisCommands {
         return 1
     }
     
+    /**
+     * Points the player at the in-game menu.
+     *
+     * The menu itself is a client screen, so the server cannot open it directly without a
+     * dedicated packet; telling the player exactly where to click is honest and works on every
+     * client, including vanilla ones connected to an Aeonis server.
+     */
+    private fun showMenuHint(ctx: CommandContext<CommandSourceStack>): Int {
+        ctx.source.sendSuccess(
+            {
+                Component.literal("§e[AEONIS] §7The manual and settings are in ") .append(
+                    Component.literal("§fOptions > Aeonis")
+                ).append(Component.literal("§7, or Mod Menu > Aeonis. Everything in it is also documented in /aeonis help."))
+            },
+            false
+        )
+        return 1
+    }
+
+    /**
+     * One block of state for a bug report: version, session count, and the caller's own form.
+     *
+     * Deliberately duplicates nothing from `/aeonis sys ping` (which reports performance); this
+     * answers "what is Aeonis doing right now".
+     */
+    private fun diagnostics(ctx: CommandContext<CommandSourceStack>): Int {
+        val source = ctx.source
+        val player = source.player as? ServerPlayer
+        val server = source.server
+
+        val sessionCount = com.qc.aeonis.transform.TransformSessions.count()
+        val form = player?.let { com.qc.aeonis.transform.TransformService.entityNameFor(it) } ?: "none"
+        val movement = player?.let { p ->
+            val entityId = com.qc.aeonis.network.AeonisNetwork.getControlledEntityId(p.uuid)
+            val mob = entityId?.let { p.level().getEntity(it) } as? net.minecraft.world.entity.Mob
+            mob?.let { com.qc.aeonis.transform.MobMovementProfiles.profileFor(it).describe() }
+        } ?: "n/a"
+        val abilities = player?.let { p ->
+            val entityId = com.qc.aeonis.network.AeonisNetwork.getControlledEntityId(p.uuid)
+            val mob = entityId?.let { p.level().getEntity(it) } as? net.minecraft.world.entity.Mob
+            mob?.let { m -> com.qc.aeonis.transform.MobAbilities.forMob(m).size.toString() }
+        } ?: "0"
+
+        source.sendSuccess(
+            {
+                Component.literal("§6[AEONIS] §7diagnostics")
+                    .append(Component.literal("\n§7  version: §f5.0.0 (Minecraft 26.3)"))
+                    .append(Component.literal("\n§7  active transform sessions: §f$sessionCount"))
+                    .append(Component.literal("\n§7  your form: §f$form"))
+                    .append(Component.literal("\n§7  movement: §f$movement"))
+                    .append(Component.literal("\n§7  abilities available: §f$abilities"))
+                    .append(Component.literal("\n§7  players online: §f${server.playerList.playerCount}"))
+            },
+            false
+        )
+        return 1
+    }
+
     private fun systemPing(ctx: CommandContext<CommandSourceStack>): Int {
         val source = ctx.source
         val server = source.server

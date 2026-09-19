@@ -60,28 +60,12 @@ loom {
 
 }
 
-sourceSets {
-	main {
-		kotlin {
-			exclude("com/qc/aeonis/entity/ancard/**")
-			exclude("com/qc/aeonis/dimension/AncardSovereignSpawnManager.kt")
-		}
-		java {
-			exclude("com/qc/aeonis/entity/ancard/**")
-		}
-	}
-	client {
-		kotlin {
-			exclude("com/qc/aeonis/client/entity/AncardEntityRenderers.kt")
-			exclude("com/qc/aeonis/client/entity/AncardMobGeoModel.kt")
-			exclude("com/qc/aeonis/client/block/**")
-			exclude("com/qc/aeonis/screen/**")
-			exclude("com/qc/aeonis/mixin/client/TransformationCameraMixin.kt")
-		}
-		java {
-		}
-	}
-}
+// No source set is excluded from compilation. The last known exclusions are gone: the
+// `com.qc.aeonis.entity.ancard.**` package and `AncardSovereignSpawnManager` never existed in
+// this tree, and the client renderers that referenced them (plus the SafeChest renderer, whose
+// `com.qc.aeonis.block.SafeChest*` classes were also absent) had no callers, so they were
+// deleted rather than compiled behind an exclusion. See TODO.md section 2.
+
 
 fabricApi {
 	configureDataGeneration {
@@ -122,6 +106,28 @@ processResources {
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version
 	}
+}
+
+/**
+ * Resolves every mixin injection against the real Minecraft jar.
+ *
+ * `validateMixinReferences` below only proves that the mixin *classes* exist, which lets a mixin
+ * that targets a renamed method compile cleanly and crash the game on boot. This task shells out
+ * to scripts/check-mixin-targets.py, which inspects the deobfuscated jar with javap and checks
+ * method selectors, handler signatures and static-ness.
+ *
+ * It is a separate task rather than part of `check` because it needs python3 and a deobfuscated
+ * jar; CI chooses whether to run it.
+ */
+tasks.register("validateMixinTargets", Exec) {
+	group = "verification"
+	description = "Resolves mixin injection targets against the deobfuscated Minecraft jar"
+
+	// Depends on the jar the checker inspects, so a fresh clone works in one command.
+	dependsOn("build")
+
+	workingDir = rootProject.projectDir
+	commandLine("python3", "scripts/check-mixin-targets.py")
 }
 
 tasks.register("validateMixinReferences") {
