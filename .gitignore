@@ -45,3 +45,10 @@ mappings/
 # OS
 .DS_Store
 Thumbs.db
+
+# AI Training
+ai-training/.venv/
+**/__pycache__/
+ai-training/checkpoints/*.pt
+checkpoints/
+*.pyc

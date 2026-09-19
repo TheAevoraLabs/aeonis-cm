@@ -43,14 +43,15 @@ class OnnxMovementController(
 
     init {
         var initialized = false
-        if (modelBytes != null && modelBytes.isNotEmpty()) {
+        val bytes = modelBytes ?: loadDefaultModelBytes()
+        if (bytes != null && bytes.isNotEmpty()) {
             try {
                 val environment = OrtEnvironment.getEnvironment()
                 val sessionOptions = OrtSession.SessionOptions().apply {
                     setIntraOpNumThreads(1)
                     setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
                 }
-                val sess = environment.createSession(modelBytes, sessionOptions)
+                val sess = environment.createSession(bytes, sessionOptions)
                 this.env = environment
                 this.session = sess
                 initialized = true
@@ -60,6 +61,16 @@ class OnnxMovementController(
             }
         }
         this.isNeuralEnabled = initialized
+    }
+
+    private fun loadDefaultModelBytes(): ByteArray? {
+        return try {
+            OnnxMovementController::class.java.getResourceAsStream("/assets/aeonis/models/movement_policy.onnx")?.use {
+                it.readBytes()
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**
