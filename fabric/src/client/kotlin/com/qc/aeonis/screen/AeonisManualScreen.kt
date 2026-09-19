@@ -97,7 +97,6 @@ class AeonisManualScreen(
     }
 
     override fun extractRenderState(graphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
-        extractBackground(graphics, mouseX, mouseY, partialTick)
         super.extractRenderState(graphics, mouseX, mouseY, partialTick)
 
         val section = AeonisManual.sections.getOrNull(index) ?: return

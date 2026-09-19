@@ -43,6 +43,7 @@ object AeonisManager : ModInitializer {
 		com.qc.aeonis.block.AeonisBlocks.register()
 		AeonisEntities.register()
 		com.qc.aeonis.item.AeonisItems.register()
+		com.qc.aeonis.inventory.AeonisMenus.register()
 		AeonisPossession.register()
 		
 		PropHuntManager.register()
@@ -130,6 +131,7 @@ object AeonisManager : ModInitializer {
 
 			server.execute {
 				AeonisPossession.onPlayerJoin(handler.player, server)
+				com.qc.aeonis.companion.CompanionBotManager.onPlayerJoin(handler.player)
 				AeonisNetwork.broadcastControllingPlayers(server)
 			}
 		}
@@ -139,6 +141,7 @@ object AeonisManager : ModInitializer {
 			// Runs synchronously so the restored gamemode and visibility are part of the data the
 			// server saves for this disconnect. Only the broadcast is deferred.
 			TransformService.handleQuit(player)
+			com.qc.aeonis.companion.CompanionBotManager.onPlayerDisconnect(player)
 			server.execute {
 				AeonisNetwork.broadcastControllingPlayers(server)
 				AeonisPossession.onPlayerDisconnect(player, server)

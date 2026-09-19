@@ -17,6 +17,13 @@ import net.minecraft.world.InteractionHand
 import net.minecraft.world.InteractionResult
 import net.minecraft.world.damagesource.DamageSource
 import net.minecraft.world.entity.*
+import net.minecraft.world.entity.EquipmentSlot
+import com.qc.aeonis.companion.inventory.CompanionInventory
+import com.qc.aeonis.companion.inventory.CompanionMenu
+import com.qc.aeonis.companion.entity.CompanionPlayerSurrogate
+import com.qc.aeonis.companion.ai.observer.PlayerIntentObserver
+import com.qc.aeonis.companion.ai.observer.PlayerIntent
+import com.qc.aeonis.companion.ai.brain.CompanionBehaviorTree
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier
 import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.entity.ai.goal.*
@@ -74,8 +81,24 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
     private var currentBreakingPos: BlockPos? = null
     private var breakProgress = 0f
     
-    // Inventory
-    private val blockInventory = mutableMapOf<net.minecraft.world.level.block.Block, Int>()
+    // True 33-slot Inventory & Player Surrogate Trampoline
+    val inventory = CompanionInventory()
+    private var surrogate: CompanionPlayerSurrogate? = null
+    var brainTree: CompanionBehaviorTree? = null
+
+    fun getOrCreateSurrogate(): CompanionPlayerSurrogate? {
+        val serverLevel = level() as? ServerLevel ?: return null
+        if (surrogate == null || surrogate?.level() != serverLevel) {
+            val ownerProfile = getOwnerPlayer()?.gameProfile
+            surrogate = CompanionPlayerSurrogate(serverLevel, this, ownerProfile)
+        }
+        return surrogate
+    }
+
+    override fun getItemBySlot(slot: EquipmentSlot): ItemStack = inventory.getEquipmentBySlot(slot)
+    override fun setItemSlot(slot: EquipmentSlot, stack: ItemStack) { inventory.setEquipmentBySlot(slot, stack) }
+    override fun getMainHandItem(): ItemStack = inventory.mainHandItem
+    override fun getOffhandItem(): ItemStack = inventory.offHandItem
     
     // Threat Memory
     private val threatMemory = mutableMapOf<UUID, Int>() // EntityID -> Tick duration
@@ -119,11 +142,13 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
     override fun readAdditionalSaveData(input: ValueInput) {
         input.read("Owner", UUIDUtil.CODEC).ifPresent { ownerUuid = it }
         forcedMode = ForcedMode.entries[input.getIntOr("ForcedMode", 0).coerceIn(0, ForcedMode.entries.size - 1)]
+        inventory.load(input)
     }
 
     override fun addAdditionalSaveData(output: ValueOutput) {
         ownerUuid?.let { output.store("Owner", UUIDUtil.CODEC, it) }
         output.putInt("ForcedMode", forcedMode.ordinal)
+        inventory.save(output)
     }
 
     fun createSnapshot() = CompanionSnapshot(health, forcedMode.ordinal)
@@ -152,15 +177,56 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
         level().playSound(null, blockPosition(), SoundEvents.ENDERMAN_TELEPORT, SoundSource.NEUTRAL, 1f, 1f)
     }
 
+    private var intentObserver: PlayerIntentObserver? = null
+
+    fun getPlayerIntent(): PlayerIntent {
+        val owner = getOwnerPlayer() ?: return PlayerIntent.RESTING
+        if (intentObserver == null) {
+            intentObserver = PlayerIntentObserver(owner)
+        }
+        return intentObserver!!.evaluate()
+    }
+
     override fun aiStep() {
         super.aiStep()
         if (level().isClientSide) return
         val serverLevel = level() as? ServerLevel ?: return
 
+        if (brainTree == null) {
+            brainTree = CompanionBehaviorTree(this)
+        }
+
         tickCooldowns()
         cleanThreatMemory()
-        updateCombatTarget(serverLevel)
+        brainTree?.tick()
         handleEmergencyTeleport()
+    }
+
+    override fun remove(reason: Entity.RemovalReason) {
+        super.remove(reason)
+        brainTree?.close()
+        brainTree = null
+    }
+
+    private fun handleIntentSynergy(level: ServerLevel) {
+        if (tickCount % 20 != 0) return
+        val intent = getPlayerIntent()
+        if (intent == PlayerIntent.MINING) {
+            tryAutoTorch(level)
+        }
+    }
+
+    private fun tryAutoTorch(level: ServerLevel): Boolean {
+        val pos = blockPosition()
+        if (level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, pos) < 7) {
+            val torchSlot = (0 until CompanionInventory.CONTAINER_SIZE).firstOrNull {
+                inventory.getItem(it).`is`(Items.TORCH)
+            }
+            if (torchSlot != null) {
+                return tryPlaceBlock(pos, Direction.UP)
+            }
+        }
+        return false
     }
 
     private fun tickCooldowns() {
@@ -215,16 +281,34 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
             }
         }
         
-        if (ownerUuid == player.uuid && health < maxHealth) {
-            if (stack.`is`(Items.IRON_INGOT) || stack.`is`(Items.COPPER_INGOT)) {
+        if (ownerUuid == player.uuid) {
+            if (health < maxHealth && (stack.`is`(Items.IRON_INGOT) || stack.`is`(Items.COPPER_INGOT))) {
                 heal(10.0f)
                 if (!player.abilities.instabuild) stack.shrink(1)
                 level().playSound(null, blockPosition(), SoundEvents.IRON_GOLEM_REPAIR, SoundSource.NEUTRAL, 1f, 1f)
                 return InteractionResult.SUCCESS
             }
+
+            // Shift+Right click or empty-hand opens the Companion Container GUI
+            if (player is ServerPlayer && (player.isShiftKeyDown || stack.isEmpty)) {
+                openCustomInventory(player)
+                return InteractionResult.SUCCESS
+            }
         }
 
         return super.mobInteract(player, hand)
+    }
+
+    fun openCustomInventory(player: ServerPlayer) {
+        player.openMenu(object : net.minecraft.world.MenuProvider {
+            override fun createMenu(syncId: Int, playerInventory: net.minecraft.world.entity.player.Inventory, player: Player): net.minecraft.world.inventory.AbstractContainerMenu {
+                return CompanionMenu(syncId, playerInventory, inventory)
+            }
+
+            override fun getDisplayName(): Component {
+                return customName ?: Component.literal("Aeonis Companion")
+            }
+        })
     }
 
     fun getDangerEntity(): LivingEntity? {
@@ -238,19 +322,23 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
 
     fun isRetreating(): Boolean = forcedMode == ForcedMode.RUN_AWAY
 
-    fun tryPlaceBlock(pos: BlockPos): Boolean {
+    fun tryPlaceBlock(pos: BlockPos, face: Direction = Direction.UP): Boolean {
         if (blockPlaceCooldown > 0 || level().isClientSide) return false
         val serverLevel = level() as? ServerLevel ?: return false
         if (!serverLevel.getBlockState(pos).isAir) return false
-        val blockToPlace = blockInventory.entries.firstOrNull { it.value > 0 } ?: return false
-        val hasSupport = Direction.entries.any { serverLevel.getBlockState(pos.relative(it)).isSolid }
-        if (!hasSupport) return false
-        serverLevel.setBlock(pos, blockToPlace.key.defaultBlockState(), 3)
-        
-        level().playSound(null, pos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 1f, 1f)
-        blockInventory[blockToPlace.key] = blockToPlace.value - 1
-        blockPlaceCooldown = 15
-        return true
+
+        val playerSurrogate = getOrCreateSurrogate()
+        val blockStack = (CompanionInventory.BACKPACK_START until CompanionInventory.CONTAINER_SIZE)
+            .map { inventory.getItem(it) }
+            .firstOrNull { it.item is net.minecraft.world.item.BlockItem }
+            ?: return false
+
+        val success = playerSurrogate?.placeBlock(pos, face, blockStack) ?: false
+        if (success) {
+            blockPlaceCooldown = 15
+            level().playSound(null, pos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 1f, 1f)
+        }
+        return success
     }
 
     fun tryBreakBlock(pos: BlockPos): Boolean {
@@ -262,18 +350,23 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
         if (currentBreakingPos != pos) {
             currentBreakingPos = pos
             breakProgress = 0f
+            val bestTool = inventory.findBestTool(state)
+            if (bestTool != inventory.mainHandItem) {
+                inventory.mainHandItem = bestTool
+            }
         }
 
-        breakProgress += 0.15f
-        
+        breakProgress += 0.25f
+
         if (breakProgress >= 1.0f) {
-            serverLevel.destroyBlock(pos, true, this)
+            val playerSurrogate = getOrCreateSurrogate()
+            val success = playerSurrogate?.mineBlock(pos) ?: serverLevel.destroyBlock(pos, true, this)
             currentBreakingPos = null
             breakProgress = 0f
             blockBreakCooldown = 10
-            return true
+            return success
         }
-        
+
         return false
     }
 
@@ -485,8 +578,13 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
         val items = level.getEntitiesOfClass(ItemEntity::class.java, boundingBox.inflate(1.5))
         for (item in items) {
             if (item.isAlive) {
-                getOwnerPlayer()?.let { owner ->
-                    item.teleportTo(owner.x, owner.y, owner.z)
+                val leftover = inventory.collectDrop(item.item)
+                if (leftover.isEmpty) {
+                    take(item, item.item.count)
+                    item.discard()
+                    level.playSound(null, blockPosition(), SoundEvents.ITEM_PICKUP, SoundSource.NEUTRAL, 0.5f, 1.2f)
+                } else {
+                    item.item = leftover
                 }
             }
         }

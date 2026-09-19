@@ -18,12 +18,14 @@ class NeoForgeRegistrationHelper : RegistrationHelper {
     private val ITEMS = DeferredRegister.create(BuiltInRegistries.ITEM, Aeonis.MOD_ID)
     private val ENTITY_TYPES = DeferredRegister.create(BuiltInRegistries.ENTITY_TYPE, Aeonis.MOD_ID)
     private val BLOCK_ENTITY_TYPES = DeferredRegister.create(BuiltInRegistries.BLOCK_ENTITY_TYPE, Aeonis.MOD_ID)
+    private val MENUS = DeferredRegister.create(BuiltInRegistries.MENU, Aeonis.MOD_ID)
 
     fun register(bus: IEventBus) {
         BLOCKS.register(bus)
         ITEMS.register(bus)
         ENTITY_TYPES.register(bus)
         BLOCK_ENTITY_TYPES.register(bus)
+        MENUS.register(bus)
     }
 
     override fun <T : Block> registerBlock(name: String, supplier: Supplier<T>): Supplier<T> {
@@ -40,5 +42,9 @@ class NeoForgeRegistrationHelper : RegistrationHelper {
 
     override fun <T : BlockEntity> registerBlockEntityType(name: String, supplier: Supplier<BlockEntityType<T>>): Supplier<BlockEntityType<T>> {
         return BLOCK_ENTITY_TYPES.register(name, supplier)
+    }
+
+    override fun <T : net.minecraft.world.inventory.AbstractContainerMenu> registerMenuType(name: String, supplier: Supplier<net.minecraft.world.inventory.MenuType<T>>): Supplier<net.minecraft.world.inventory.MenuType<T>> {
+        return MENUS.register(name, supplier)
     }
 }

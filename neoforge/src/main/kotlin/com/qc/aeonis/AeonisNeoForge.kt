@@ -47,6 +47,7 @@ class AeonisNeoForge(bus: IEventBus) {
         com.qc.aeonis.block.AeonisBlocks.register()
         com.qc.aeonis.item.AeonisItems.register()
         com.qc.aeonis.entity.AeonisEntities.register()
+        com.qc.aeonis.inventory.AeonisMenus.register()
         com.qc.aeonis.AeonisPossession.register()
         
         com.qc.aeonis.minigame.prophunt.PropHuntManager.register()
@@ -192,6 +193,7 @@ class AeonisNeoForge(bus: IEventBus) {
         // A stale control entry from an unclean disconnect would otherwise leave the returning
         // player invisible with no session to restore from.
         com.qc.aeonis.network.AeonisNetwork.clearControlState(player.uuid)
+        com.qc.aeonis.companion.CompanionBotManager.onPlayerJoin(player)
         event.entity.level().server?.let { server ->
             server.execute {
                 com.qc.aeonis.network.AeonisNetwork.broadcastControllingPlayers(server)
@@ -204,6 +206,7 @@ class AeonisNeoForge(bus: IEventBus) {
         // The possessed mob is a real saved entity, so quitting mid-morph must discard it and
         // restore the player before the disconnect is persisted.
         com.qc.aeonis.transform.TransformService.handleQuit(player)
+        com.qc.aeonis.companion.CompanionBotManager.onPlayerDisconnect(player)
     }
 
     private fun onPlayerRespawn(event: PlayerEvent.PlayerRespawnEvent) {

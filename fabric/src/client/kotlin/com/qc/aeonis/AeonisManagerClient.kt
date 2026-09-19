@@ -23,5 +23,21 @@ object AeonisManagerClient : ClientModInitializer {
 		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("aeonis", "ability_hud"), AeonisAbilityHud)
 		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("aeonis", "ancard_post_processing"), AncardPostProcessing)
 		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("aeonis", "ancard_lightning_events"), AncardLightningEvents)
+
+		try {
+			val registerMethod = net.minecraft.client.gui.screens.MenuScreens::class.java.getDeclaredMethod(
+				"register",
+				net.minecraft.world.inventory.MenuType::class.java,
+				net.minecraft.client.gui.screens.MenuScreens.ScreenConstructor::class.java
+			)
+			registerMethod.isAccessible = true
+			registerMethod.invoke(
+				null,
+				com.qc.aeonis.inventory.AeonisMenus.COMPANION_MENU.get(),
+				net.minecraft.client.gui.screens.MenuScreens.ScreenConstructor { menu: com.qc.aeonis.companion.inventory.CompanionMenu, playerInv, title ->
+					com.qc.aeonis.client.gui.CompanionScreen(menu, playerInv, title)
+				}
+			)
+		} catch (e: Exception) {}
 	}
 }

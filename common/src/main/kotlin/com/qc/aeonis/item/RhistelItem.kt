@@ -38,41 +38,26 @@ class RhistelItem(properties: Properties) : Item(properties) {
             return InteractionResult.FAIL
         }
 
-        // Cycle to next mode
-        val currentMode = bot.forcedMode
-        val nextMode = when (currentMode) {
-            CompanionBotEntity.ForcedMode.NONE  -> CompanionBotEntity.ForcedMode.ATTACK
-            CompanionBotEntity.ForcedMode.ATTACK -> CompanionBotEntity.ForcedMode.FOLLOW
-            CompanionBotEntity.ForcedMode.FOLLOW -> CompanionBotEntity.ForcedMode.RUN_AWAY
-            CompanionBotEntity.ForcedMode.RUN_AWAY -> CompanionBotEntity.ForcedMode.NONE
+        // Shift + Right Click triggers 3D Tactical Ping
+        if (player.isShiftKeyDown) {
+            if (com.qc.aeonis.companion.command.RhistelPingHandler.executePing(serverPlayer, bot)) {
+                serverPlayer.cooldowns.addCooldown(player.getItemInHand(hand), 10)
+                return InteractionResult.SUCCESS
+            }
         }
 
-        bot.forcedMode = nextMode
+        // Right-Click: Remotely open Companion GUI
+        bot.openCustomInventory(serverPlayer)
 
-        // Feedback
-        val (label, color) = when (nextMode) {
-            CompanionBotEntity.ForcedMode.ATTACK  -> "ATTACK"  to "§c"
-            CompanionBotEntity.ForcedMode.FOLLOW   -> "FOLLOW"  to "§a"
-            CompanionBotEntity.ForcedMode.RUN_AWAY -> "RUN AWAY" to "§e"
-            CompanionBotEntity.ForcedMode.NONE     -> "AUTO"    to "§b"
-        }
-
-        serverPlayer.sendSystemMessage(
-            Component.literal("§6[Rhistel] §7Mode set to $color$label")
-        )
-
-        // Whistle sound
+        // Communicator chime
         level.playSound(
             null,
             player.blockPosition(),
-            SoundEvents.NOTE_BLOCK_BELL.value(),
+            SoundEvents.NOTE_BLOCK_CHIME.value(),
             SoundSource.PLAYERS,
             1.0f,
-            1.4f
+            1.6f
         )
-
-        // Cooldown so you don't accidentally multi-click (10 ticks = 0.5s)
-        serverPlayer.cooldowns.addCooldown(player.getItemInHand(hand), 10)
 
         return InteractionResult.SUCCESS
     }
@@ -84,7 +69,8 @@ class RhistelItem(properties: Properties) : Item(properties) {
         consumer: java.util.function.Consumer<Component>,
         flag: TooltipFlag
     ) {
-        consumer.accept(Component.literal("§7Right-click to cycle companion mode"))
-        consumer.accept(Component.literal("§8ATTACK → FOLLOW → RUN AWAY → AUTO"))
+        consumer.accept(Component.literal("§bRight-click: §7Open Companion Communicator GUI"))
+        consumer.accept(Component.literal("§6Shift + Right-click: §73D Tactical Ping"))
+        consumer.accept(Component.literal("§8Focus Attack • Deposit • Mine Vein • Move & Hold"))
     }
 }

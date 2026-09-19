@@ -65,7 +65,6 @@ class AeonisPlaceholderConfigScreen(private val parent: Screen?) : Screen(Compon
     }
 
     override fun extractRenderState(graphics: GuiGraphics, mouseX: Int, mouseY: Int, a: Float) {
-        extractBackground(graphics, mouseX, mouseY, a)
         super.extractRenderState(graphics, mouseX, mouseY, a)
 
         val boxX = (width - 320) / 2

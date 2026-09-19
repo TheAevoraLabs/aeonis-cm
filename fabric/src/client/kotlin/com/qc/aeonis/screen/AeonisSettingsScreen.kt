@@ -178,7 +178,6 @@ class AeonisSettingsScreen(private val parent: Screen?) : Screen(Component.trans
     }
 
     override fun extractRenderState(graphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
-        extractBackground(graphics, mouseX, mouseY, partialTick)
         super.extractRenderState(graphics, mouseX, mouseY, partialTick)
 
         // Toggle labels are redrawn from the stored value so the button text can never disagree

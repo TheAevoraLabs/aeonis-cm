@@ -32,4 +32,9 @@ class FabricRegistrationHelper : RegistrationHelper {
         val type = Registry.register(BuiltInRegistries.BLOCK_ENTITY_TYPE, Identifier.fromNamespaceAndPath("aeonis", name), supplier.get())
         return Supplier { type }
     }
+
+    override fun <T : net.minecraft.world.inventory.AbstractContainerMenu> registerMenuType(name: String, supplier: Supplier<net.minecraft.world.inventory.MenuType<T>>): Supplier<net.minecraft.world.inventory.MenuType<T>> {
+        val type = Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath("aeonis", name), supplier.get())
+        return Supplier { type }
+    }
 }
