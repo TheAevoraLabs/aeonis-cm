@@ -1,29 +1,19 @@
 package com.qc.aeonis.companion.ai.movement
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtException
-import ai.onnxruntime.OrtSession
-import net.minecraft.core.BlockPos
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.phys.Vec3
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.FloatBuffer
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Executes high-frequency neural policy inference (< 0.2ms) for micro-movement,
+ * Executes high-frequency neural policy inference for micro-movement,
  * obstacle avoidance, and kinetic parkour.
  *
- * Employs zero-allocation off-heap FloatBuffers and guarantees deterministic off-heap
- * native cleanup to prevent off-heap leaks on Java 25.
+ * Tiered Execution Pipeline:
+ * 1. Native ONNX Runtime Backend (hardware-accelerated C++ via JNI when available on classpath).
+ * 2. Pure JVM Neural Engine (zero-dependency forward pass directly in JVM bytecode from movement_weights.bin).
+ * 3. Kinematic Heuristic Fallback (deterministic smooth steering and sprint-jump mechanics).
  *
- * Includes an integrated kinematic heuristic fallback if no trained neural model is loaded
- * or if native ONNX acceleration is uninitialized.
+ * Guaranteed never to crash on missing native libraries or NoClassDefFoundError.
  */
 class OnnxMovementController(
     modelBytes: ByteArray? = null
@@ -37,41 +27,8 @@ class OnnxMovementController(
         val sneak: Boolean
     )
 
-    private var env: OrtEnvironment? = null
-    private var session: OrtSession? = null
-    private val isNeuralEnabled: Boolean
-
-    init {
-        var initialized = false
-        val bytes = modelBytes ?: loadDefaultModelBytes()
-        if (bytes != null && bytes.isNotEmpty()) {
-            try {
-                val environment = OrtEnvironment.getEnvironment()
-                val sessionOptions = OrtSession.SessionOptions().apply {
-                    setIntraOpNumThreads(1)
-                    setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                }
-                val sess = environment.createSession(bytes, sessionOptions)
-                this.env = environment
-                this.session = sess
-                initialized = true
-            } catch (e: Exception) {
-                // Fallback to heuristic steering if native lib or model format fails
-                initialized = false
-            }
-        }
-        this.isNeuralEnabled = initialized
-    }
-
-    private fun loadDefaultModelBytes(): ByteArray? {
-        return try {
-            OnnxMovementController::class.java.getResourceAsStream("/assets/aeonis/models/movement_policy.onnx")?.use {
-                it.readBytes()
-            }
-        } catch (e: Exception) {
-            null
-        }
-    }
+    private val backend: MotorBackend? = createBackend(modelBytes)
+    val isNeuralEnabled: Boolean = backend != null
 
     /**
      * Extracts a 5x5x5 (125-cell) voxel grid around the bot:
@@ -119,81 +76,21 @@ class OnnxMovementController(
         horizontalCollision: Boolean,
         localVoxelGrid125: FloatArray
     ): MotorAction {
-        if (isNeuralEnabled && session != null && env != null) {
-            try {
-                return predictNeural(relativeTarget, velocity, onGround, inWater, horizontalCollision, localVoxelGrid125)
-            } catch (e: Exception) {
-                // Fallback on inference error
-            }
+        val neuralAction = try {
+            backend?.predict(relativeTarget, velocity, onGround, inWater, horizontalCollision, localVoxelGrid125)
+        } catch (_: Throwable) {
+            null
         }
 
-        return predictHeuristic(relativeTarget, velocity, onGround, inWater, horizontalCollision, localVoxelGrid125)
-    }
-
-    private fun predictNeural(
-        relativeTarget: Vec3,
-        velocity: Vec3,
-        onGround: Boolean,
-        inWater: Boolean,
-        horizontalCollision: Boolean,
-        localVoxelGrid125: FloatArray
-    ): MotorAction {
-        val totalFloats = 6 + 6 + 125
-        val byteBuffer = ByteBuffer.allocateDirect(totalFloats * 4).order(ByteOrder.nativeOrder())
-        val buffer = byteBuffer.asFloatBuffer()
-
-        // 1. Target features (6 floats)
-        buffer.put(relativeTarget.x.toFloat())
-        buffer.put(relativeTarget.y.toFloat())
-        buffer.put(relativeTarget.z.toFloat())
-        val dist = relativeTarget.length().toFloat()
-        buffer.put(dist)
-        val yawDelta = (atan2(relativeTarget.z, relativeTarget.x) * (180.0 / Math.PI)).toFloat()
-        buffer.put(yawDelta)
-        buffer.put(0.0f) // pitch delta
-
-        // 2. Kinematic state features (6 floats)
-        buffer.put(velocity.x.toFloat())
-        buffer.put(velocity.y.toFloat())
-        buffer.put(velocity.z.toFloat())
-        buffer.put(if (onGround) 1.0f else 0.0f)
-        buffer.put(if (inWater) 1.0f else 0.0f)
-        buffer.put(if (horizontalCollision) 1.0f else 0.0f)
-
-        // 3. 125-cell voxel environment
-        buffer.put(localVoxelGrid125)
-        buffer.flip()
-
-        val environment = env!!
-        val sess = session!!
-
-        var inputTensor: OnnxTensor? = null
-        var result: OrtSession.Result? = null
-        try {
-            inputTensor = OnnxTensor.createTensor(environment, buffer, longArrayOf(1, totalFloats.toLong()))
-            result = sess.run(mapOf("state_input" to inputTensor))
-
-            val outputTensor = result.get(0) as? OnnxTensor
-            if (outputTensor != null) {
-                val output = (outputTensor.value as Array<FloatArray>)[0]
-                val forward = output[0].coerceIn(-1.0f, 1.0f)
-                val strafe = output[1].coerceIn(-1.0f, 1.0f)
-                val jump = output[2] > 0.5f
-                val sprint = output[3] > 0.5f
-                val sneak = output.getOrNull(4)?.let { it > 0.5f } ?: false
-
-                return MotorAction(forward, strafe, jump, sprint, sneak)
-            }
-        } finally {
-            inputTensor?.close()
-            result?.close()
+        if (neuralAction != null) {
+            return neuralAction
         }
 
         return predictHeuristic(relativeTarget, velocity, onGround, inWater, horizontalCollision, localVoxelGrid125)
     }
 
     /**
-     * Kinematic heuristic motor controller used when ONNX model is uninitialized.
+     * Kinematic heuristic motor controller used when neural weights are uninitialized.
      * Provides smooth steering, sprint-jump mechanics, and collision avoidance.
      */
     private fun predictHeuristic(
@@ -209,11 +106,6 @@ class OnnxMovementController(
             return MotorAction(0f, 0f, jump = false, sprint = false, sneak = false)
         }
 
-        // Relative target vector normalized
-        val nx = relativeTarget.x / distXZ
-        val nz = relativeTarget.z / distXZ
-
-        // Determine if jumping is required (obstacle in front or step-up)
         val shouldJump = (horizontalCollision && onGround) ||
                 (relativeTarget.y > 0.6 && distXZ < 2.0 && onGround) ||
                 inWater
@@ -228,12 +120,51 @@ class OnnxMovementController(
 
     override fun close() {
         try {
-            session?.close()
-            session = null
-            env?.close()
-            env = null
-        } catch (e: Exception) {
-            // Ignore on shutdown
+            backend?.close()
+        } catch (_: Throwable) {
+        }
+    }
+
+    companion object {
+        private fun createBackend(modelBytes: ByteArray?): MotorBackend? {
+            // Priority 1: Native ONNX Runtime backend (if OrtEnvironment is available on classpath)
+            try {
+                Class.forName("ai.onnxruntime.OrtEnvironment")
+                val onnxBytes = modelBytes ?: loadResourceBytes("/assets/aeonis/models/movement_policy.onnx")
+                if (onnxBytes != null && onnxBytes.isNotEmpty()) {
+                    val clazz = Class.forName("com.qc.aeonis.companion.ai.movement.OrtMotorBackend")
+                    val constructor = clazz.getConstructor(ByteArray::class.java)
+                    return constructor.newInstance(onnxBytes) as MotorBackend
+                }
+            } catch (_: Throwable) {
+                // Ignore missing ONNX runtime (NoClassDefFoundError, ClassNotFoundException, UnsatisfiedLinkError)
+            }
+
+            // Priority 2: Pure JVM Neural Engine (evaluates trained weights in pure JVM bytecode, 0 dependencies)
+            try {
+                val weightBytes = loadResourceBytes("/assets/aeonis/models/movement_weights.bin")
+                if (weightBytes != null && weightBytes.isNotEmpty()) {
+                    val pureBackend = PureNeuralMotorBackend.fromBytes(weightBytes)
+                    if (pureBackend != null) {
+                        return pureBackend
+                    }
+                }
+            } catch (_: Throwable) {
+                // Ignore parsing errors
+            }
+
+            // Priority 3: Fallback to kinematic heuristics
+            return null
+        }
+
+        private fun loadResourceBytes(path: String): ByteArray? {
+            return try {
+                OnnxMovementController::class.java.getResourceAsStream(path)?.use {
+                    it.readBytes()
+                }
+            } catch (_: Throwable) {
+                null
+            }
         }
     }
 }

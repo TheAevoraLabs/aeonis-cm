@@ -88,7 +88,64 @@ def export_to_onnx(
         shutil.copyfile(output_path, abs_asset_path)
         print(f"✓ Deployed ONNX policy to Minecraft mod assets: {abs_asset_path}")
 
+    # Also export pure JVM weights binary for zero-dependency native execution
+    export_weights_bin(model, deploy_to_assets=deploy_to_assets)
+
     return output_path
+
+
+def export_weights_bin(
+    model: MovementActorCritic,
+    output_bin_path: str = os.path.join(parent_dir, "checkpoints", "movement_weights.bin"),
+    deploy_to_assets: bool = True,
+    asset_target_bin_path: str = os.path.join(
+        REPO_ROOT, "common", "src", "main", "resources", "assets", "aeonis", "models", "movement_weights.bin"
+    ),
+):
+    """
+    Exports policy weights to a compact flat binary format for pure JVM execution
+    without requiring external native ONNX libraries.
+    """
+    model.eval()
+    sd = model.state_dict()
+    tensors = [
+        sd["kinematic_net.0.weight"].cpu().numpy().flatten(),
+        sd["kinematic_net.0.bias"].cpu().numpy().flatten(),
+        sd["kinematic_net.2.weight"].cpu().numpy().flatten(),
+        sd["kinematic_net.2.bias"].cpu().numpy().flatten(),
+        sd["kinematic_net.3.weight"].cpu().numpy().flatten(),
+        sd["kinematic_net.3.bias"].cpu().numpy().flatten(),
+        sd["voxel_net.0.weight"].cpu().numpy().flatten(),
+        sd["voxel_net.0.bias"].cpu().numpy().flatten(),
+        sd["voxel_net.2.weight"].cpu().numpy().flatten(),
+        sd["voxel_net.2.bias"].cpu().numpy().flatten(),
+        sd["voxel_net.3.weight"].cpu().numpy().flatten(),
+        sd["voxel_net.3.bias"].cpu().numpy().flatten(),
+        sd["backbone.0.weight"].cpu().numpy().flatten(),
+        sd["backbone.0.bias"].cpu().numpy().flatten(),
+        sd["backbone.2.weight"].cpu().numpy().flatten(),
+        sd["backbone.2.bias"].cpu().numpy().flatten(),
+        sd["backbone.3.weight"].cpu().numpy().flatten(),
+        sd["backbone.3.bias"].cpu().numpy().flatten(),
+        sd["actor_continuous_mean.0.weight"].cpu().numpy().flatten(),
+        sd["actor_continuous_mean.0.bias"].cpu().numpy().flatten(),
+        sd["actor_continuous_mean.2.weight"].cpu().numpy().flatten(),
+        sd["actor_continuous_mean.2.bias"].cpu().numpy().flatten(),
+        sd["actor_discrete_logits.0.weight"].cpu().numpy().flatten(),
+        sd["actor_discrete_logits.0.bias"].cpu().numpy().flatten(),
+        sd["actor_discrete_logits.2.weight"].cpu().numpy().flatten(),
+        sd["actor_discrete_logits.2.bias"].cpu().numpy().flatten(),
+    ]
+    all_floats = np.concatenate(tensors).astype(np.float32)
+    os.makedirs(os.path.dirname(os.path.abspath(output_bin_path)), exist_ok=True)
+    all_floats.tofile(output_bin_path)
+    print(f"✓ Exported pure-JVM weights binary ({len(all_floats)} floats): {output_bin_path}")
+
+    if deploy_to_assets:
+        abs_bin = os.path.abspath(asset_target_bin_path)
+        os.makedirs(os.path.dirname(abs_bin), exist_ok=True)
+        shutil.copyfile(output_bin_path, abs_bin)
+        print(f"✓ Deployed pure-JVM weights binary to Minecraft mod assets: {abs_bin}")
 
 
 def main():
