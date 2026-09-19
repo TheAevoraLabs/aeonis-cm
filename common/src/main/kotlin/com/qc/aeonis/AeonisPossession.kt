@@ -3,6 +3,7 @@ package com.qc.aeonis
 import com.qc.aeonis.item.AeonisItems
 import com.qc.aeonis.entity.BodyEntity
 import com.qc.aeonis.network.AeonisNetwork
+import com.qc.aeonis.transform.PlayerRestoreState
 import com.qc.aeonis.entity.AeonisEntities
 import net.minecraft.resources.Identifier
 import net.minecraft.server.level.ServerPlayer
@@ -26,7 +27,7 @@ object AeonisPossession {
     val bodyPositions = mutableMapOf<UUID, DoubleArray>()
     val mobInventories = mutableMapOf<Int, Array<ItemStack?>>()
     private val inventoryBackups = mutableMapOf<UUID, Array<ItemStack?>>()
-    private val originalGameModes = mutableMapOf<UUID, GameType>()
+    private val restoreStates = mutableMapOf<UUID, PlayerRestoreState>()
     private val playerPreviousSelectedSlot = mutableMapOf<UUID, Int>()
     private val mobLastSelectedSlot = mutableMapOf<Int, Int>()
 
@@ -38,7 +39,7 @@ object AeonisPossession {
     fun onPlayerDisconnect(player: ServerPlayer, server: MinecraftServer) {}
 
     fun isOriginalModeSpectator(uuid: UUID): Boolean {
-        return originalGameModes[uuid] == GameType.SPECTATOR
+        return restoreStates[uuid]?.gameMode == GameType.SPECTATOR
     }
 
     fun isActivelyPossessing(uuid: UUID): Boolean = activePossessions[uuid] == true
@@ -52,7 +53,7 @@ object AeonisPossession {
         
         val pos = player.position()
         bodyPositions[player.uuid] = doubleArrayOf(pos.x, pos.y, pos.z)
-        originalGameModes[player.uuid] = player.gameMode.gameModeForPlayer
+        restoreStates[player.uuid] = PlayerRestoreState.capture(player)
         
         val body = AeonisEntities.BODY.get().create(player.level(), EntitySpawnReason.COMMAND) ?: return false
         body.setPos(pos.x, pos.y, pos.z)
@@ -69,18 +70,20 @@ object AeonisPossession {
 
     fun release(player: ServerPlayer) {
         if (activePossessions[player.uuid] != true) return
-        
+
         AeonisNetwork.removeControlledEntity(player)
         val body = playerBodies.remove(player.uuid)
         body?.discard()
-        
+
         val pos = bodyPositions.remove(player.uuid)
         if (pos != null) {
             player.teleportTo(pos[0], pos[1], pos[2])
         }
-        
-        val mode = originalGameModes.remove(player.uuid) ?: GameType.SURVIVAL
-        player.setGameMode(mode)
+
+        // Restore the whole snapshot rather than only the gamemode: releasing used to leave the
+        // player invisible and still carrying the possessed mob's max health.
+        val restore = restoreStates.remove(player.uuid) ?: PlayerRestoreState.safeDefault()
+        restore.applyTo(player)
         activePossessions[player.uuid] = false
     }
 }

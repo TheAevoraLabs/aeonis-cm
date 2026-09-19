@@ -37,7 +37,10 @@
     "ControlledMobEnvironmentalDamageMixin",
     "ControlledSpecialMobAbilityMixin",
     "ControlledMobServerAiStepMixin",
-    "ControlledAquaticBreathingMixin"
+    "ControlledAquaticBreathingMixin",
+    "CreeperPowerMixin",
+    "AxolotlVariantMixin",
+    "ParrotVariantMixin"
   ],
   "injectors": {
     "defaultRequire": 1

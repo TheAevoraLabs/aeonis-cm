@@ -16,8 +16,10 @@ import com.qc.aeonis.minigame.prophunt.PropHuntCommands
 import com.qc.aeonis.minigame.prophunt.PropHuntManager
 import com.qc.aeonis.network.AeonisNetwork
 import com.qc.aeonis.network.AeonisServerNetworking
+import com.qc.aeonis.transform.TransformService
 import net.fabricmc.api.ModInitializer
 import net.fabricmc.fabric.api.entity.event.v1.EntitySleepEvents
+import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents
@@ -67,7 +69,10 @@ object AeonisManager : ModInitializer {
             com.qc.aeonis.dimension.AncardDimensionRules.tick(server)
             com.qc.aeonis.dimension.AncardEclipseEvent.tick(server)
             HerobrineSpawner.tick(server)
-            
+
+            // Detects a possessed mob that died or unloaded and unwinds the session before the
+            // sync loop below can act on a stale entity id.
+            TransformService.tick(server)
             TransformationManager.tickEnd(server)
         }
 		
@@ -91,6 +96,9 @@ object AeonisManager : ModInitializer {
 		}
 		
 		ServerLifecycleEvents.SERVER_STOPPING.register { server ->
+			// End every transform session so no playerless mob is serialised into the save and no
+			// restore snapshot is lost across a restart.
+			TransformService.shutdown(server)
 			AeonisAssistant.despawnAll()
 			LlmConfigStorage.shutdown()
 			logger.info("LLM shutdown complete")
@@ -116,7 +124,7 @@ object AeonisManager : ModInitializer {
 			if (!AeonisFeatures.hasShownWorldInstallNotice(server)) {
 				AeonisFeatures.markWorldInstallNoticeShown(server)
 				server.execute {
-					player.sendSystemMessage(Component.literal("§eThanks for installing Aeonis! We are still actively porting many lost features to 26.1 (The Tiny Takeover Update)."))
+					player.sendSystemMessage(Component.literal("§eThanks for installing Aeonis! This build targets Minecraft 26.3. See TODO.md for known gaps."))
 				}
 			}
 
@@ -128,11 +136,19 @@ object AeonisManager : ModInitializer {
 
 		ServerPlayConnectionEvents.DISCONNECT.register { handler, server ->
 			val player = handler.player
+			// Runs synchronously so the restored gamemode and visibility are part of the data the
+			// server saves for this disconnect. Only the broadcast is deferred.
+			TransformService.handleQuit(player)
 			server.execute {
-				AeonisNetwork.clearControlState(player.uuid)
 				AeonisNetwork.broadcastControllingPlayers(server)
 				AeonisPossession.onPlayerDisconnect(player, server)
 			}
+		}
+
+		// Dying mid-morph used to leave the session alive, so the position-sync loop dragged the
+		// respawned player straight back to the abandoned mob.
+		ServerPlayerEvents.AFTER_RESPAWN.register { newPlayer, _, _ ->
+			TransformService.handleRespawn(newPlayer)
 		}
 		
 		logger.info("Aeonis Plus core initialized")

@@ -13,6 +13,13 @@ Completed and verified:
 - `common`, `fabric`, and `neoforge` all compile against Minecraft 26.3.
 - `./gradlew build` produces both `fabric/build/libs/AeonisCM-5.0.0.jar` and
   `neoforge/build/libs/aeonis-5.0.0.jar` from a clean checkout.
+- The Fabric jar boots to the main menu inside a real PolyMC instance (Fabric Loader
+  0.19.5, Fabric API 0.161.0+26.3), driven by `scripts/mc-smoke-test.py`. This was the
+  first time any build of this port was launched, and it found two mixins that
+  crashed the client at startup (both fixed).
+- Every mixin injection target in `fabric`, `neoforge` and `common` is checked against
+  the 26.3 mappings by `scripts/check-mixin-targets.py`, which closes the audited gap
+  described in section 4.
 - The project is relicensed to GPL-3.0-or-later under Aevora Labs.
 - Old branding (QuantumCreeper, Quantum_Creeper, TeamQC-MC, Emberveil, Emberdust) is
   removed from mod metadata, sources, and the in-game splash texts.
@@ -25,9 +32,11 @@ Completed and verified:
 Not completed (details below):
 
 - The NeoForge jar cannot load on 26.3 while KotlinForForge does not support it.
-- The `transform` system improvements (variant support, data-driven special attacks,
-  hardened untransform) were not implemented.
-- Loader parity was not verified by running the game; only by compiling.
+- The Fabric loader has no equivalent of the three bridge mixins added for the
+  variant system, so those variants report as unavailable there (harmless, but a gap).
+- The special-attack list is still per-mob branching in `ControlledSpecialMobAbilityMixin`.
+- Loader parity is only partly verified: the client boots and loads the mod on
+  Fabric, but no in-game command has been exercised on either loader.
 - Several source sets remain excluded from compilation, and legacy datapack content
   remains excluded from the build.
 
@@ -127,41 +136,94 @@ The real risk is mixins. Mixin targets are resolved by name at runtime, so a mix
 that targets a method or field that changed in 26.3 still compiles and then fails, or
 silently does nothing, when the game loads. `:fabric:validateMixinReferences` only
 checks that the declared mixin classes exist in the source set; it does not validate
-their injection targets. **Every mixin in `fabric/src` and `neoforge/src` should be
-audited against the 26.3 mappings before release.** This was not done.
+their injection targets.
 
-No build has been launched, so nothing in this port has been verified at runtime.
+That gap is now covered by `scripts/check-mixin-targets.py`, which resolves every
+`@Inject`/`@Redirect`/`@Accessor`/`@Shadow` selector against the deobfuscated 26.3 jar
+with `javap`. It verifies that each target class exists, that each `method` selector
+matches a real method (including inherited ones), that an `@Inject` handler carries the
+target's parameters verbatim followed by its callback, and that handler static-ness
+matches the target. It currently resolves 133 injection targets with no findings, and
+it was validated by re-introducing a known-bad descriptor and confirming it is
+reported.
 
-## 5. Requested work that was not started
+Two mixin failures were real and are fixed:
 
-### Transform system hardening (highest-value remaining work)
+| Mixin | Problem | Fix |
+| --- | --- | --- |
+| `MobRenderMixin` (both loaders) | `EntityRenderer#shouldRender` gained a trailing `float partialTick`; the handler still had the old signature, so the whole client died with `InvalidInjectionException` | handler now takes the `float` |
+| `InGameOverlayRendererMixin` | `ScreenEffectRenderer#getViewBlockingState` no longer exists; the wall-overlay logic moved to `LevelExtractor#getViewBlockingState(LocalPlayer, Frustum)` | retargeted, with the new parameter list |
 
-The `/transform` and mob possession system was ported but not improved. Outstanding:
+The static check cannot see injection *points* (`@At` selectors, ordinals, local
+captures), so an `@Inject` whose method exists but whose `@At` target does not will
+still fail only at runtime, when the target class loads. The client boot test covers
+the classes that load before the main menu; entity, world and HUD mixins are still
+only covered when a world is opened.
 
-- `[variant...]` is still effectively non-functional. The command signature accepts
-  variants, but only a small hardcoded set (slime size, a few mob-specific cases) is
-  honoured. Variants should map onto a validated, documented per-entity schema, and
-  unsupported variants should produce a clear error instead of being ignored.
-- Untransform and cleanup still rely on several independent state maps
-  (`transformedEntities`, camera state, inventory, gamemode) that can desynchronise.
-  Past changelogs already flag players getting stuck in a broken post-transform
-  state. This needs a single authoritative per-player transform record with an
-  idempotent teardown that restores inventory, gamemode, camera, and collision, and
-  that also runs on player death, disconnect, and dimension change.
-- The special-attack list (Wither, Ender Dragon, Breeze, Blaze, Ghast, Chicken, and
-  others) is still implemented as per-mob branching in `ControlledSpecialMobAbilityMixin`
-  and `AeonisCommands`. It should be data-driven, for example a registry of
-  attack definitions with cooldowns, so new mobs do not require new branches.
-- Entity ID validation produces generic errors. It should distinguish unknown IDs,
-  valid but non-possessable entities, and entities that exist but cannot be
-  possessed in the current dimension or gamemode.
+## 5. Transform system: done in this pass, and what remains
+
+### Done
+
+The `/transform` feature was rebuilt around a `com.qc.aeonis.transform` package:
+
+- `MobVariants` is a registry of declarative variant descriptors. `AeonisMobVariants`
+  registers every built-in variant; adding a mob is a new descriptor and no command
+  changes. Variants are validated: a token that names a real variant for the wrong mob
+  reports "not available for this mob", an unknown token reports "unknown", and a
+  variant that fails reports "could not be applied". Nothing is silently ignored.
+- Variants now actually work: all 16 sheep wool colours, `powered` creeper (real synced
+  flag, not a fake glowing effect), `screaming` goat, cube sizes, `saddle`/`armor`,
+  zombie/skeleton conversions via vanilla `Mob#convertTo`, axolotl and parrot colours,
+  and sulfur-cube surfaces. `baby`/`adult` apply to every mob.
+- Two real bugs fixed along the way: `MagmaCube` does not extend `Slime`, and every
+  skeleton subtype extends `AbstractSkeleton` rather than `Skeleton`, so several
+  variants never matched the mobs they were written for.
+- The command takes a greedy variant list (was two fixed slots), tab-completes variants
+  filtered to the chosen mob, and gained `/transform variants <entity>` and
+  `/transform info`.
+- Transform state is one record (`TransformSession` plus a `PlayerRestoreState`
+  snapshot) rather than four loose maps shared with soul mode. Restoration is a single
+  idempotent operation that always resets gamemode, visibility, collision, flight,
+  camera and health.
+- Teardown now runs on untransform, mob death, player death/respawn, disconnect and
+  server shutdown. Disconnecting mid-morph used to leave the possessed mob saved into
+  the world and the returning player stuck invisible; dying mid-morph used to drag the
+  respawned player back to the abandoned mob.
+- Entity validation creates the entity and rejects anything that is not a `Mob`, which
+  closes the case where transforming into a non-mob left a player invisible forever.
+- `/ai chaotic` no longer uses reflection (26.3 exposes `Mob#getGoalSelector`) and
+  `/ai chaotic stop` removes exactly the goals it added; it previously removed the
+  first three goals in priority order, deleting the mob's own AI, and its tracking set
+  was never populated so the command always reported 0.
+- `/aeonis reload` and server shutdown now unwind every session, rather than clearing
+  bookkeeping and orphaning mobs. A player sitting in soul mode at shutdown used to be
+  saved mid-spectator.
+
+### Remaining
+
+- Special attacks (Wither, Ender Dragon, Breeze, Blaze, Ghast, Chicken) are still
+  per-mob branches in `ControlledSpecialMobAbilityMixin`. The variant registry is the
+  natural template for turning those into data-driven attack definitions with cooldowns.
+- `Wolf` and `Frog` variants use registry-backed `Holder<...Variant>` values rather than
+  an int id, so they are not covered by the bridge-mixin pattern and remain unsupported.
+- NeoForge needs the three bridge mixins ported (`CreeperPowerMixin`,
+  `AxolotlVariantMixin`, `ParrotVariantMixin`) or those variants will silently report as
+  unavailable on that loader.
+- Soul mode and the `AeonisPossession` body-swap remain two separate systems. They were
+  decoupled so they cannot corrupt each other's restore state, but a future pass should
+  merge them into one possession service.
+- Nothing here has been exercised in a running game. Entity interactions in particular
+  need an in-game pass: verifying a conversion variant keeps the session bound to the
+  replacement entity, and that `powered`/`axolotl`/`parrot` bridges actually apply.
 
 ### Loader parity verification
 
-The parity requirement was not met in practice. Both jars compile, but no command in
-the list (`/transform`, `/prank`, `/ability`, `/ai`, `/event`, `/aeonis`, `/comp`) has
-been executed on either loader. Given the mixin risk above and the excluded source
-sets, assume parity is unverified rather than achieved. This is the main reason not
+The parity requirement is still not met. The Fabric jar now boots to the main menu
+with the mod loaded, which proves the startup path and the core mixin set, but no
+command in the list (`/transform`, `/prank`, `/ability`, `/ai`, `/event`, `/aeonis`,
+`/comp`) has been executed on either loader, and the NeoForge jar still cannot load at
+all (section 1). Given the remaining mixin risk above and the excluded source sets,
+assume in-game parity is unverified rather than achieved. This is the main reason not
 to publish 5.0.0 as a finished release.
 
 ### Deeper refactors worth considering
@@ -180,12 +242,10 @@ to publish 5.0.0 as a finished release.
 These are pre-existing conditions, not introduced by the 26.3 port, but they will
 confuse anyone who picks this up next.
 
-- **The multi-loader restructure was never committed.** Local `dev` sits one commit
-  ahead of `origin/dev` in a commit that deletes the entire old `src/` tree and
-  rewrites the build files into a multi-project layout - but the `common/`, `fabric/`,
-  and `neoforge/` source trees it depends on were left untracked. As committed,
-  the repository cannot build. All of the source changes described in this file are
-  currently uncommitted working-tree changes.
+- **The multi-loader restructure is now committed.** The `common/`, `fabric/` and
+  `neoforge/` source trees, the transform package and the two new scripts under
+  `scripts/` landed in the same commit as this file, so a fresh clone builds. Before
+  that commit the repository could not build, because the source trees were untracked.
 - **The remote was renamed.** `origin` now points at
   `https://github.com/TheAevoraLabs/aeonis-cm`. The old `TeamQC-MC/aeonis-cm` URL
   redirects there, so previously cloned checkouts still fetch successfully.
@@ -232,6 +292,63 @@ All of these move quickly and at least one is expected to change.
   1.17.x build once one is validated.
 - **Mod Menu 21.0.0-beta.1** - beta, and optional.
 - **Gradle 9.5.1** - pinned in the wrapper for reproducibility.
+
+## 9. Automated run testing
+
+Two scripts under `scripts/` turn the parts of this document that used to read "not
+verified" into something reproducible. Both are plain `python3` with no third-party
+dependencies.
+
+### `scripts/mc-smoke-test.py` - does the client actually boot?
+
+Builds the Fabric jar, copies it into the PolyMC instance's `mods/` folder, and
+launches Minecraft using that instance's own launcher metadata (`meta/`, `libraries/`,
+`assets/`). No launcher, no account and no network access are needed: the client runs
+on a local dev profile. The run passes when the client reaches the main menu and fails
+on a crash report, a mixin apply error or an entrypoint failure. The client is killed
+as soon as a verdict is reached, so a passing run takes well under a minute.
+
+```
+python3 scripts/mc-smoke-test.py                  # build, sync, launch, check
+python3 scripts/mc-smoke-test.py --no-build       # reuse the existing jar
+python3 scripts/mc-smoke-test.py --dry-run        # print the launch command
+python3 scripts/mc-smoke-test.py --instance "26.3"   # any PolyMC instance
+```
+
+The defaults point at the `26.3 Fabric` instance through
+`~/.var/app/org.polymc.PolyMC/data/PolyMC`; override with `POLYMC_HOME` or
+`--polymc-home`. Exit status is 0 only on a green run, so it can gate a release.
+
+What it does **not** cover: anything past the main menu. Mixins that apply to entity,
+world or HUD classes are not exercised until a world is loaded, so a main-menu pass is
+a floor, not a parity check.
+
+### `scripts/check-mixin-targets.py` - are the mixins still pointing at real code?
+
+Resolves every mixin injection in the repository against the deobfuscated Minecraft
+jar from the Loom cache (see section 4). This is the check `validateMixinReferences`
+never performed, and it is the fastest way to find the class of bug that broke
+`MobRenderMixin`.
+
+```
+python3 scripts/check-mixin-targets.py
+python3 scripts/check-mixin-targets.py --module fabric
+python3 scripts/check-mixin-targets.py --jar /path/to/minecraft-merged-deobf-26.3.jar
+```
+
+It requires a deobfuscated jar, so run `./gradlew :fabric:build` at least once first.
+It does not understand dynamic selectors (selectors built from constants), and it does
+not see `@At` injection points, so it is a complement to the boot test rather than a
+replacement for it.
+
+### Known gap found by the boot test
+
+The client logs `Missing model for variant: 'Block{aeonis:permanent_flame}'`. The
+`permanent_flame` block is registered in `AeonisBlocks`, but the jar ships no
+`blockstates/`, no block models and no item model for it - in fact
+`common/src/main/resources/assets/aeonis` has nothing but `textures/`. Every block and
+item the mod registers is therefore missing its model. This needs a model pass (or
+generated models), not just a one-line fix.
 
 Note that the 9.4.1 distribution listed in some notes is not used; the wrapper was
 moved to 9.5.1, which is what Fabric's own 26.3 example mod uses.

@@ -18,7 +18,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public class MobRenderMixin<T extends Entity> {
     
     @Inject(method = "shouldRender", at = @At("HEAD"), cancellable = true)
-    private void aeonis$hideControlledMobInFirstPerson(T entity, Frustum frustum, double x, double y, double z, CallbackInfoReturnable<Boolean> cir) {
+    private void aeonis$hideControlledMobInFirstPerson(T entity, Frustum frustum, double x, double y, double z, float partialTick, CallbackInfoReturnable<Boolean> cir) {
         Minecraft client = Minecraft.getInstance();
         
         // Check if we're in first person view

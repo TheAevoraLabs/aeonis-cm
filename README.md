@@ -74,6 +74,33 @@ The first build downloads Minecraft, the loader toolchains, and mappings, and ca
 take several minutes. Java 25 must be available; the build requests a Java 25
 toolchain and does not rely on a hardcoded JDK path.
 
+## Testing a build
+
+Two helpers under `scripts/` check a build without needing a launcher or an account.
+
+Boot the mod in a real PolyMC instance and confirm the client reaches the main menu:
+
+```bash
+python3 scripts/mc-smoke-test.py
+```
+
+It builds the Fabric jar, copies it into the instance's `mods/` folder, launches
+Minecraft with that instance's own libraries and assets, and exits non-zero on a
+crash, a mixin apply error or an entrypoint failure. Use `--instance`,
+`--polymc-home` or the `POLYMC_HOME` environment variable to target another instance,
+`--no-build` to reuse the existing jar, and `--dry-run` to inspect the launch command.
+
+Check that every mixin still targets code that exists in the current Minecraft jar:
+
+```bash
+python3 scripts/check-mixin-targets.py
+```
+
+This resolves `@Inject`, `@Redirect`, `@Accessor` and `@Shadow` selectors against the
+deobfuscated jar with `javap`, catching renames and signature changes that compile
+cleanly and then fail at runtime. Run `./gradlew :fabric:build` at least once first, so
+that the jar it inspects has been produced.
+
 ## Project layout
 
 Aeonis is a three-module Gradle build. The split is deliberate: the mod is large

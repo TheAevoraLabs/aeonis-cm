@@ -8,6 +8,6 @@ object Aeonis {
 
     fun init() {
         LOGGER.info("Initializing Aeonis Common")
-        // Shared registry calls will go here
+        com.qc.aeonis.transform.TransformService.initialise()
     }
 }

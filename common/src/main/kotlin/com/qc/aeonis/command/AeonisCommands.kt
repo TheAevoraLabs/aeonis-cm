@@ -17,6 +17,12 @@ import com.qc.aeonis.entity.AeonisEntities
 import com.qc.aeonis.entity.HerobrineEntity
 import com.qc.aeonis.entity.HerobrineSpawner
 import com.qc.aeonis.network.AeonisNetwork
+import com.qc.aeonis.transform.MobKinds
+import com.qc.aeonis.transform.MobVariants
+import com.qc.aeonis.transform.SoulMode
+import com.qc.aeonis.transform.TransformResult
+import com.qc.aeonis.transform.TransformService
+import com.qc.aeonis.transform.TransformSessions
 import net.minecraft.commands.CommandBuildContext
 import net.minecraft.commands.CommandSourceStack
 import net.minecraft.commands.Commands
@@ -92,70 +98,47 @@ object AeonisCommands {
             val server = ctx.source.server
             for (level in server.allLevels) {
                 for (entityId in chaoticEntities) {
-                    val entity = level.getEntity(entityId)
-                    if (entity is PathfinderMob && entity.isAlive) {
-                        try {
-                            val goalSelectorField = Mob::class.java.getDeclaredField("goalSelector")
-                            goalSelectorField.isAccessible = true
-                            val goalSelector = goalSelectorField.get(entity) as? net.minecraft.world.entity.ai.goal.GoalSelector
-                            if (goalSelector != null) {
-                                val goals = goalSelector.availableGoals
-                                val toRemove = goals.take(3).toList()
-                                for (goal in toRemove) {
-                                    goalSelector.removeGoal(goal.goal)
-                                }
-                            }
-                            entity.removeEffect(MobEffects.SPEED)
-                            count++
-                        } catch (_: Exception) {}
+                    val entity = level.getEntity(entityId) as? PathfinderMob ?: continue
+                    val injected = chaoticGoals.remove(entityId)
+                    if (injected != null) {
+                        // Remove exactly the goals we added. The previous implementation removed
+                        // the first three goals in priority order, which deleted the mob's own AI
+                        // instead of the injected ones.
+                        val selector = entity.goalSelector
+                        injected.forEach { selector.removeGoal(it) }
+                        count++
                     }
+                    entity.removeEffect(MobEffects.SPEED)
                 }
             }
             chaoticEntities.clear()
+            chaoticGoals.clear()
             ctx.source.sendSuccess({ Component.literal("§aStopped chaotic AI on $count entities.") }, true)
             return count
         }
 
-        // Accessor for original game modes used by AeonisManager tick handler
-        fun getOriginalGameMode(uuid: java.util.UUID): GameType? = originalGameModes[uuid]
-
-        fun cacheOriginalMoveSpeed(player: ServerPlayer) {
-            if (originalMoveSpeeds.containsKey(player.uuid)) return
-            val attr = player.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED) ?: return
-            originalMoveSpeeds[player.uuid] = attr.baseValue
-        }
-
-        fun restoreOriginalMoveSpeed(player: ServerPlayer) {
-            val original = originalMoveSpeeds.remove(player.uuid) ?: return
-            player.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED)?.baseValue = original
-        }
-
         private fun reloadMod(ctx: CommandContext<CommandSourceStack>): Int {
-            // Reset all mod features and states
+            // Transform sessions and soul mode live in the transform package and are reset
+            // there, so there is no second set of maps to forget to clear.
             chaoticEntities.clear()
-            originalGameModes.clear()
-            transformedEntities.clear()
+            chaoticGoals.clear()
             prankMorphTimers.clear()
             petVexOwners.clear()
             actorWalkTargets.clear()
             actorLookTargets.clear()
             actorAttackTargets.clear()
-            // Optionally, reload config or features if needed
+            // Full teardown rather than dropping bookkeeping: every morphed player is unwound and
+            // every possessed mob removed, so nothing is left orphaned in the world.
+            TransformService.shutdown(ctx.source.server)
             ctx.source.sendSuccess({ Component.literal("§bAeonis mod features reloaded and states reset.") }, true)
             return 1
         }
     
-    // Track original gamemode for untransform
-    private val originalGameModes = mutableMapOf<java.util.UUID, GameType>()
-    // Track original movement speed for untransform
-    private val originalMoveSpeeds = mutableMapOf<java.util.UUID, Double>()
-    private val transformedEntities = mutableMapOf<java.util.UUID, Entity>()
-    
-    // Track players in soul mode (spectator mode where they can possess existing mobs)
-    private val soulModePlayers = mutableSetOf<java.util.UUID>()
-    
     // Track pet vex ownership: vex entity ID -> owner player UUID
     internal val petVexOwners = mutableMapOf<Int, java.util.UUID>()
+
+    // Goals injected by /ai chaotic, tracked per entity so they can be removed precisely.
+    private val chaoticGoals = mutableMapOf<Int, MutableList<net.minecraft.world.entity.ai.goal.Goal>>()
     
     // Director Mode: Active Orders
     private val actorWalkTargets = mutableMapOf<Int, Vec3>()
@@ -305,14 +288,14 @@ object AeonisCommands {
                 continue
             }
 
-            if (!AeonisNetwork.isPlayerTransformed(playerUuid) || !transformedEntities.containsKey(playerUuid)) {
+            if (!TransformService.isTransformed(player)) {
                 iterator.remove()
                 continue
             }
 
             val nextTicks = ticks - 1
             if (nextTicks <= 0) {
-                autoUntransform(player, showMessage = true)
+                TransformService.untransform(player, showMessage = true)
                 player.sendSystemMessage(Component.literal("§e🎭 Prank morph expired. Back to normal!"))
                 iterator.remove()
             } else {
@@ -334,7 +317,7 @@ object AeonisCommands {
         dispatcher: CommandDispatcher<CommandSourceStack>,
         registryAccess: net.minecraft.commands.CommandBuildContext
     ) {
-        // /transform random|theme|roulette|<entity> [variants...]
+        // /transform random|roulette|theme|info|variants|<entity> [variants...]
         dispatcher.register(
             Commands.literal("transform")
                 .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
@@ -344,27 +327,31 @@ object AeonisCommands {
                 .then(Commands.literal("roulette")
                     .executes { transformRoulette(it) }
                 )
+                .then(Commands.literal("info")
+                    .executes { transformInfo(it) }
+                )
+                .then(Commands.literal("variants")
+                    .then(Commands.argument("entity", ResourceArgument.resource(registryAccess, Registries.ENTITY_TYPE))
+                        .executes { transformListVariants(it) }
+                    )
+                )
                 .then(Commands.literal("theme")
                     .then(Commands.argument("name", StringArgumentType.word())
+                        .suggests { _, builder ->
+                            FUN_TRANSFORM_THEMES.keys.sorted().forEach { builder.suggest(it) }
+                            builder.buildFuture()
+                        }
                         .executes { transformTheme(it) }
                     )
                 )
                 .then(Commands.argument("entity", ResourceArgument.resource(registryAccess, Registries.ENTITY_TYPE))
                     .executes { transformIntoEntity(it, emptyList()) }
-                    .then(Commands.argument("variant", StringArgumentType.word())
-                        .executes { 
-                            val variants = listOf(StringArgumentType.getString(it, "variant"))
-                            transformIntoEntity(it, variants)
+                    // Greedy so any number of variants can be chained; the old form allowed two.
+                    .then(Commands.argument("variants", StringArgumentType.greedyString())
+                        .suggests(variantSuggester)
+                        .executes {
+                            transformIntoEntity(it, parseVariants(StringArgumentType.getString(it, "variants")))
                         }
-                        .then(Commands.argument("variant2", StringArgumentType.word())
-                            .executes { 
-                                val variants = listOf(
-                                    StringArgumentType.getString(it, "variant"),
-                                    StringArgumentType.getString(it, "variant2")
-                                )
-                                transformIntoEntity(it, variants)
-                            }
-                        )
                     )
                 )
         )
@@ -782,7 +769,10 @@ object AeonisCommands {
         source.sendSuccess({ Component.literal("§a/aeonis features safe_chest_physics <true/false>§7 - Toggle Safe Chest falling behavior") }, false)
         source.sendSuccess({ Component.literal("§a/aeonis features safe_chest_fall_hurt <true/false>§7 - Toggle Safe Chest fall damage") }, false)
         source.sendSuccess({ Component.literal("§a/aeonis summon_herobrine [behind|roaming|staring|hunting]§7 - Summon Herobrine") }, false)
-        source.sendSuccess({ Component.literal("§a/transform <entity> [variant...]§7 - Become any mob! Optionally specify variants.") }, false)
+        source.sendSuccess({ Component.literal("§a/transform <entity> [variant...]§7 - Become any mob! Tab-completes variants.") }, false)
+        source.sendSuccess({ Component.literal("§a/transform variants <entity>§7 - List the variants that mob supports") }, false)
+        source.sendSuccess({ Component.literal("§a/transform info§7 - Show your current form") }, false)
+        source.sendSuccess({ Component.literal("§a/transform random|roulette|theme <name>§7 - Randomised transforms") }, false)
         source.sendSuccess({ Component.literal("§a/untransform§7 - Return to normal") }, false)
         source.sendSuccess({ Component.literal("§a/aeonis soul§7 - Enter soul mode (spectator + possess existing mobs with P key)") }, false)
         source.sendSuccess({ Component.literal("§a/aeonis unsoul§7 - Exit soul mode") }, false)
@@ -951,490 +941,157 @@ object AeonisCommands {
     }
     
     // ========== ENTITY TRANSFORM ==========
-    
-    @Suppress("UNCHECKED_CAST")
-    private fun transformIntoEntity(ctx: CommandContext<CommandSourceStack>, variants: List<String> = emptyList()): Int {
+
+    /**
+     * `/transform <entity> [variants...]`
+     *
+     * All validation and state handling lives in [TransformService]. This only turns the command
+     * context into a request and the result back into chat feedback, so the command path and the
+     * programmatic paths (random, themes, pranks, possession) cannot drift apart.
+     */
+    private fun transformIntoEntity(ctx: CommandContext<CommandSourceStack>, variants: List<String>): Int {
         val source = ctx.source
         val player = source.player as? ServerPlayer ?: run {
             source.sendFailure(Component.literal("§cOnly players can transform!"))
             return 0
         }
-        val level = player.level()
-
-        // Store original gamemode in case we need to restore it on failure
-        val originalMode = player.gameMode.gameModeForPlayer
-
-        // --- FUN ENHANCEMENT: Play sound and spawn particles ---
-        try {
-            // Play a random fun sound (e.g. villager celebrate, totem use, or generic)
-            val sounds = listOf(
-                net.minecraft.sounds.SoundEvents.PLAYER_LEVELUP,
-                net.minecraft.sounds.SoundEvents.FIREWORK_ROCKET_LARGE_BLAST,
-                net.minecraft.sounds.SoundEvents.AMETHYST_CLUSTER_BREAK,
-                net.minecraft.sounds.SoundEvents.GOAT_SCREAMING_AMBIENT
-            )
-            val sound = sounds.random()
-            level.playSound(null, player.blockPosition(), sound, net.minecraft.sounds.SoundSource.PLAYERS, 1.2f, 1.0f)
-            // Spawn some particles (e.g. happy villager, explosion, or portal)
-            val particles = listOf(
-                net.minecraft.core.particles.ParticleTypes.HAPPY_VILLAGER,
-                net.minecraft.core.particles.ParticleTypes.EXPLOSION,
-                net.minecraft.core.particles.ParticleTypes.PORTAL
-            )
-            val particle = particles.random()
-            level.sendParticles(particle, player.x, player.y + 1.0, player.z, 32, 0.5, 1.0, 0.5, 0.1)
-        } catch (_: Exception) {}
-        
-        // Get entity type from argument
-        val entityTypeRef = ResourceArgument.getSummonableEntityType(ctx, "entity")
-        val entityType = entityTypeRef.value() as? EntityType<Entity> ?: run {
+        val entityType = ResourceArgument.getSummonableEntityType(ctx, "entity").value() as? EntityType<*>
+        if (entityType == null) {
             source.sendFailure(Component.literal("§cInvalid entity type!"))
             return 0
         }
-        
-        // ========== HEROBRINE SPECIAL: You can't become ME! ==========
-        if (entityType == com.qc.aeonis.entity.AeonisEntities.HEROBRINE.get()) {
-            triggerHerobrineScareSequence(player, level)
-            // Restore original gamemode if transform fails
-            player.setGameMode(originalMode)
-            return 0 // Transformation denied!
-        }
-        
-        // ========== BODY ENTITY: Internal use only ==========
-        if (entityType == com.qc.aeonis.entity.AeonisEntities.BODY.get()) {
-            source.sendFailure(Component.literal("§cThe Body entity is for internal use only! Use /event possess with a Soul item instead."))
-            player.setGameMode(originalMode)
-            return 0
-        }
-        
-        // Check if already controlling any entity (command-transform, soul mode possess, or possession mode)
-        if (AeonisNetwork.isPlayerTransformed(player.uuid)) {
-            source.sendFailure(Component.literal("§cYou're already transformed! Use /untransform first."))
-            // Restore original gamemode if transform fails
-            player.setGameMode(originalMode)
-            return 0
-        }
-        
-        // Spawn the entity at player's location
-        val entity = entityType.spawn(
-            level,
-            player.blockPosition(),
-            EntitySpawnReason.COMMAND
-        )
-        
-        if (entity == null) {
-            source.sendFailure(Component.literal("§cFailed to spawn entity!"))
-            // Restore original gamemode if transform fails
-            player.setGameMode(originalMode)
-            return 0
-        }
 
-        // Initialize the spawned mob with the player's current transform context for smoother first tick.
-        entity.snapTo(player.x, player.y, player.z, player.yRot, player.xRot)
-        if (entity is LivingEntity) {
-            entity.yBodyRot = player.yRot
-            entity.yHeadRot = player.yRot
-        }
-        
-        // Apply variants
-        var variantInfo = ""
-        if (variants.isNotEmpty()) {
-            variantInfo = applyVariants(entity, variants)
-            if (variantInfo.isNotEmpty()) {
-                variantInfo = " §7(§e$variantInfo§7)"
+        return when (val result = TransformService.transform(player, entityType, variants)) {
+            is TransformResult.Success -> {
+                announceTransform(player, result)
+                1
+            }
+            is TransformResult.Rejected -> {
+                source.sendFailure(Component.literal("§c${result.reason}"))
+                if (result.herobrineScare) {
+                    (player.level() as? ServerLevel)?.let { triggerHerobrineScareSequence(player, it) }
+                }
+                0
+            }
+            is TransformResult.Failed -> {
+                source.sendFailure(Component.literal("§c${result.reason}"))
+                0
             }
         }
-        
-        // Store original gamemode and entity reference
-        originalGameModes[player.uuid] = player.gameMode.gameModeForPlayer
-        cacheOriginalMoveSpeed(player)
-        transformedEntities[player.uuid] = entity
-        
-        // 26.2+: `LivingEntity.aiStep` only calls `travel()` when `isEffectiveAi()` is true.
-        // Setting `NoAI` makes many mobs completely immobile. Keep NoAI off and instead suppress
-        // server-side AI logic while controlled via a dedicated mixin (see `ControlledMobServerAiStepMixin`).
-        if (entity is Mob) {
-            entity.setNoAi(false)
-        }
-        
-        // Special handling for Ender Dragon - set to hover phase
-        if (entity is EnderDragon) {
-            entity.phaseManager.setPhase(EnderDragonPhase.HOVERING)
-            // Ensure AI is enabled for Dragon
-            entity.setNoAi(false)
-            player.sendSystemMessage(
-                Component.literal("§6[AEONIS] Warning: Ender Dragon transformation is still a work in progress due to multi-AI and multi-entity boss behavior.")
-            )
-        }
-        
-        // Register entity for control
-        AeonisNetwork.setControlledEntity(player, entity.id, player.inventory.selectedSlot)
-        syncControllingPlayers(player)
-        
-        // Auto-equip weapons for ranged mobs
-        equipWeaponsForRangedMob(entity, player)
-        
-        // Set player to survival mode (allows block breaking, hotbar use) and make them invisible
-        // This mimics the QCmod possession behavior where players can still interact with the world
-        if (originalGameModes[player.uuid] == GameType.SPECTATOR) {
-            player.setGameMode(GameType.SPECTATOR)
-        } else {
-            player.setGameMode(GameType.SURVIVAL)
-            player.isInvisible = true
-        }
-        
-        // Set player health to match mob health
-        if (entity is LivingEntity) {
-            val mobMaxHealth = entity.maxHealth.toDouble()
-            player.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH)?.baseValue = mobMaxHealth
-            player.health = entity.health.coerceAtMost(mobMaxHealth.toFloat())
-        }
-        
-        // Sync player position to mob (don't use camera spectating, player controls directly)
-        player.teleportTo(entity.x, entity.y, entity.z)
-        
-        val entityName = entityType.description.string
-        // --- FUN ENHANCEMENT: Random fun message ---
-        val funMessages = listOf(
-            "Did you know? Some mobs just want a hug!",
-            "§dTransformation complete! Don't forget to moo if you're a cow.",
-            "§bYou feel... different. Is that a tail?",
-            "§eRemember: With great power comes great responsibility.",
-            "§aYou are now the ultimate imposter!",
-            "§6Fun fact: Creepers were a coding bug.",
-            "§5Try not to get sheared if you're a sheep!",
-            "§cWarning: May cause spontaneous dancing.",
-            "§9You have unlocked the secrets of morphing!"
+    }
+
+    /**
+     * Sound, particles and the success message. Played only once the transform really happened,
+     * so an invalid request no longer produces a celebratory sound effect.
+     */
+    private fun announceTransform(player: ServerPlayer, result: TransformResult.Success) {
+        val level = player.level()
+        val sounds = listOf(
+            SoundEvents.PLAYER_LEVELUP,
+            SoundEvents.FIREWORK_ROCKET_LARGE_BLAST,
+            SoundEvents.AMETHYST_CLUSTER_BREAK,
+            SoundEvents.GOAT_SCREAMING_AMBIENT
         )
-        val funMsg = funMessages.random()
-        source.sendSuccess({ 
-            Component.literal("§a✨ You transformed into a §b$entityName$variantInfo§a! Use WASD to move, SPACE to jump. §e/untransform§a to return.\n$funMsg") 
-        }, true)
+        level.playSound(null, player.blockPosition(), sounds.random(), SoundSource.PLAYERS, 1.2f, 1.0f)
+        val particles = listOf(ParticleTypes.HAPPY_VILLAGER, ParticleTypes.EXPLOSION, ParticleTypes.PORTAL)
+        level.sendParticles(particles.random(), player.x, player.y + 1.0, player.z, 32, 0.5, 1.0, 0.5, 0.1)
+
+        val entityName = result.mob.type.description.string
+        val suffix = if (result.report.applied.isEmpty()) "" else " §7(${result.report.appliedSummary()})§a"
+        player.sendSystemMessage(
+            Component.literal("§aYou transformed into a §b$entityName§a$suffix. Use WASD to move and SPACE to jump; §e/untransform§a to return.")
+        )
+        result.loadout?.let { kit ->
+            player.sendSystemMessage(Component.literal("§7[Aeonis] §aStarting kit: §e$kit"))
+        }
+        result.report.problems()?.let { note ->
+            player.sendSystemMessage(Component.literal("§eVariant note: §7$note"))
+        }
+    }
+
+    /** `/transform info` - describes the caller's current form. */
+    private fun transformInfo(ctx: CommandContext<CommandSourceStack>): Int {
+        val source = ctx.source
+        val player = source.player as? ServerPlayer ?: run {
+            source.sendFailure(Component.literal("§cOnly players can check a transform!"))
+            return 0
+        }
+        val description = TransformService.sessionDescription(player)
+        if (description == null) {
+            source.sendSuccess({ Component.literal("§7You are not transformed.") }, false)
+            return 1
+        }
+        val name = TransformService.entityNameFor(player) ?: "unknown"
+        source.sendSuccess({ Component.literal("§6Current form: §b$name §7($description)") }, false)
         return 1
     }
-    
-    // NEW: Helper function to apply variants to entities
-    private fun applyVariants(entity: Entity, variants: List<String>): String {
-        val appliedVariants = mutableListOf<String>()
-        val level = entity.level() as? ServerLevel ?: return ""
 
-        // Sulfur Cube variants are mapped to vanilla archetype item tags from 26.2 APIs/data.
-        if (isSulfurCube(entity)) {
-            for (variant in variants) {
-                val itemId = sulfurCubeVariantItemId(variant)
-                if (itemId != null && entity is LivingEntity) {
-                    val item = BuiltInRegistries.ITEM.getValue(Identifier.parse(itemId))
-                    if (item != null && item != Items.AIR) {
-                        entity.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, ItemStack(item))
-                        appliedVariants.add("Sulfur:${variant.lowercase()}")
-                    }
-                }
-            }
-            return appliedVariants.joinToString(", ")
-        }
-        
-        // Zombie variants
-        if (entity is Zombie) {
-            for (variant in variants) {
-                when (variant.lowercase()) {
-                    "baby" -> {
-                        entity.isBaby = true
-                        appliedVariants.add("Baby")
-                    }
-                    "drowned" -> {
-                        convertEntity(entity, EntityTypes.DROWNED)
-                        appliedVariants.add("Drowned")
-                    }
-                    "husk" -> {
-                        convertEntity(entity, EntityTypes.HUSK)
-                        appliedVariants.add("Husk")
-                    }
-                    "chicken_jockey" -> {
-                        entity.isBaby = true
-                        val chicken = EntityTypes.CHICKEN.spawn(
-                            level,
-                            entity.blockPosition(),
-                            EntitySpawnReason.COMMAND
-                        )
-                        if (chicken != null) {
-                            entity.startRiding(chicken)
-                            appliedVariants.add("Chicken Jockey")
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Skeleton variants
-        if (entity is Skeleton) {
-            for (variant in variants) {
-                when (variant.lowercase()) {
-                    "wither" -> {
-                        convertEntity(entity, EntityTypes.WITHER_SKELETON)
-                        appliedVariants.add("Wither")
-                    }
-                    "stray" -> {
-                        convertEntity(entity, EntityTypes.STRAY)
-                        appliedVariants.add("Stray")
-                    }
-                    "charged" -> {
-                        entity.addEffect(MobEffectInstance(MobEffects.GLOWING, Int.MAX_VALUE, 0))
-                        appliedVariants.add("Charged (Visual)")
-                    }
-                }
-            }
-        }
-        
-        // Creeper variants
-        if (entity is Creeper) {
-            for (variant in variants) {
-                when (variant.lowercase()) {
-                    "powered", "charged" -> {
-                        // NBT access issues, skipping for now
-                        entity.addEffect(MobEffectInstance(MobEffects.GLOWING, Int.MAX_VALUE, 0))
-                        appliedVariants.add("Charged (Visual)")
-                    }
-                }
-            }
-        }
-        
-        // Slime variants
-        if (entity is Slime) {
-            for (variant in variants) {
-                when (variant.lowercase()) {
-                    "big" -> {
-                        entity.setSize(4, true)
-                        appliedVariants.add("Big")
-                    }
-                    "tiny", "small" -> {
-                        entity.setSize(1, true)
-                        appliedVariants.add("Tiny")
-                    }
-                }
-            }
-        }
-        
-        // Horse variants
-        if (entity is Horse) {
-            for (variant in variants) {
-                when (variant.lowercase()) {
-                    "baby" -> {
-                        entity.isBaby = true
-                        appliedVariants.add("Baby")
-                    }
-                    "saddle" -> {
-                        entity.equipItemIfPossible(level, ItemStack(Items.SADDLE))
-                        appliedVariants.add("Saddled")
-                    }
-                    "armor" -> {
-                        entity.equipItemIfPossible(level, ItemStack(Items.DIAMOND_HORSE_ARMOR))
-                        appliedVariants.add("Armored")
-                    }
-                }
-            }
-        }
-        
-        /* Sheep variants - Temporarily disabled due to resolution issues
-        if (entity is net.minecraft.world.entity.animal.Sheep) {
-            for (variant in variants) {
-                val color = DyeColor.entries.firstOrNull { it.name.lowercase() == variant.lowercase() }
-                if (color != null) {
-                    entity.color = color
-                    appliedVariants.add(color.toString())
-                }
-            }
-        }
-        */
-        
-        // Pig variants
-        if (entity is Pig) {
-            for (variant in variants) {
-                when (variant.lowercase()) {
-                    "baby" -> {
-                        entity.isBaby = true
-                        appliedVariants.add("Baby")
-                    }
-                    "saddle" -> {
-                        entity.equipItemIfPossible(level, ItemStack(Items.SADDLE))
-                        appliedVariants.add("Saddled")
-                    }
-                }
-            }
-        }
-        
-        // Axolotl variants - Disabled due to NBT issues
-        /*
-        if (entity is Axolotl) {
-            // ...
-        }
-        */
-        
-        // Wolf variants - Disabled due to NBT issues
-        /*
-        if (entity is Wolf) {
-            // ...
-        }
-        */
-        
-        // Parrot variants - Disabled due to NBT issues
-        /*
-        if (entity is Parrot) {
-            // ...
-        }
-        */
-        
-        // Goat variants
-        if (entity is Goat) {
-            for (variant in variants) {
-                when (variant.lowercase()) {
-                    "baby" -> {
-                        entity.isBaby = true
-                        appliedVariants.add("Baby")
-                    }
-                    "screaming" -> {
-                        entity.isScreamingGoat = true
-                        appliedVariants.add("Screaming")
-                    }
-                }
-            }
-        }
-        
-        // Frog variants - Disabled due to NBT issues
-        /*
-        if (entity is Frog) {
-            // ...
-        }
-        */
-        
-        return appliedVariants.joinToString(", ")
-    }
-
-    private fun isSulfurCube(entity: Entity): Boolean {
-        return try {
-            BuiltInRegistries.ENTITY_TYPE.getKey(entity.type).path == "sulfur_cube"
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun sulfurCubeVariantItemId(variant: String): String? {
-        return when (variant.lowercase()) {
-            "regular" -> "minecraft:sulfur"
-            "bouncy" -> "minecraft:oak_planks"
-            "slow_flat" -> "minecraft:iron_block"
-            "fast_flat" -> "minecraft:wet_sponge"
-            "light" -> "minecraft:white_wool"
-            "fast_sliding" -> "minecraft:packed_ice"
-            "slow_sliding" -> "minecraft:red_mushroom_block"
-            "sticky" -> "minecraft:honeycomb_block"
-            "high_resistance" -> "minecraft:soul_sand"
-            else -> null
-        }
-    }
-    
     /**
-     * Auto-equip weapons for ranged mobs when player transforms into them.
-     * Gives the player appropriate weapons based on mob type:
-     * - Skeleton, Stray, Bogged: Bow + Arrows
-     * - Pillager: Crossbow + Arrows
-     * - Piglin: Crossbow + Arrows
-     * - Drowned: Trident
+     * `/transform variants <entity>` - lists every variant that mob accepts, sourced from the
+     * same registry the transform itself uses, so the list can never go stale.
      */
-    private fun equipWeaponsForRangedMob(entity: Entity, player: ServerPlayer) {
-        when {
-            // Skeleton types - give bow and arrows
-            entity is Skeleton || entity.type == EntityTypes.STRAY || entity.type == EntityTypes.BOGGED -> {
-                val bow = ItemStack(Items.BOW)
-                val arrows = ItemStack(Items.ARROW, 64)
-                // Add to player inventory
-                player.inventory.add(bow)
-                player.inventory.add(arrows)
-                // Also make mob hold the bow
-                if (entity is LivingEntity) {
-                    entity.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, ItemStack(Items.BOW))
-                }
-                player.sendSystemMessage(Component.literal("§7[Aeonis] §aEquipped §eBow §aand §eArrows§a!"))
-            }
-            // Pillager - give crossbow and arrows
-            entity.type == EntityTypes.PILLAGER -> {
-                val crossbow = ItemStack(Items.CROSSBOW)
-                val arrows = ItemStack(Items.ARROW, 64)
-                player.inventory.add(crossbow)
-                player.inventory.add(arrows)
-                if (entity is LivingEntity) {
-                    entity.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, ItemStack(Items.CROSSBOW))
-                }
-                player.sendSystemMessage(Component.literal("§7[Aeonis] §aEquipped §eCrossbow §aand §eArrows§a!"))
-            }
-            // Piglin - give crossbow and arrows
-            entity.type == EntityTypes.PIGLIN -> {
-                val crossbow = ItemStack(Items.CROSSBOW)
-                val arrows = ItemStack(Items.ARROW, 64)
-                player.inventory.add(crossbow)
-                player.inventory.add(arrows)
-                if (entity is LivingEntity) {
-                    entity.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, ItemStack(Items.CROSSBOW))
-                }
-                player.sendSystemMessage(Component.literal("§7[Aeonis] §aEquipped §eCrossbow §aand §eArrows§a!"))
-            }
-            // Drowned - give trident
-            entity.type == EntityTypes.DROWNED -> {
-                val trident = ItemStack(Items.TRIDENT)
-                player.inventory.add(trident)
-                if (entity is LivingEntity) {
-                    entity.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, ItemStack(Items.TRIDENT))
-                }
-                player.sendSystemMessage(Component.literal("§7[Aeonis] §aEquipped §eTrident§a!"))
-            }
-            // Wither Skeleton - give stone sword
-            entity.type == EntityTypes.WITHER_SKELETON -> {
-                val sword = ItemStack(Items.STONE_SWORD)
-                player.inventory.add(sword)
-                if (entity is LivingEntity) {
-                    entity.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, ItemStack(Items.STONE_SWORD))
-                }
-                player.sendSystemMessage(Component.literal("§7[Aeonis] §aEquipped §eStone Sword§a!"))
-            }
-            // Vindicator - give iron axe
-            entity.type == EntityTypes.VINDICATOR -> {
-                val axe = ItemStack(Items.IRON_AXE)
-                player.inventory.add(axe)
-                if (entity is LivingEntity) {
-                    entity.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, ItemStack(Items.IRON_AXE))
-                }
-                player.sendSystemMessage(Component.literal("§7[Aeonis] §aEquipped §eIron Axe§a!"))
-            }
+    private fun transformListVariants(ctx: CommandContext<CommandSourceStack>): Int {
+        val source = ctx.source
+        val level = source.level as? ServerLevel ?: run {
+            source.sendFailure(Component.literal("§cThis command needs a server world."))
+            return 0
         }
+        val entityType = ResourceArgument.getSummonableEntityType(ctx, "entity").value() as? EntityType<*>
+        if (entityType == null) {
+            source.sendFailure(Component.literal("§cInvalid entity type!"))
+            return 0
+        }
+        val name = entityType.description.string
+        val variants = TransformService.variantsFor(level, entityType)
+        if (variants.isEmpty()) {
+            source.sendFailure(Component.literal("§c$name is not a mob, so it cannot be possessed."))
+            return 0
+        }
+        source.sendSuccess({ Component.literal("§6Variants for §b$name§6 (${variants.size}):") }, false)
+        source.sendSuccess({ Component.literal("§e${variants.joinToString(", ") { it.id }}") }, false)
+        source.sendSuccess({ Component.literal("§7Usage: §a/transform $name <variant> [variant...]") }, false)
+        return 1
     }
 
-    private fun <T : Mob> convertEntity(oldEntity: Mob, newType: EntityType<T>): T? {
-        val level = oldEntity.level()
-        val newEntity = newType.create(level, EntitySpawnReason.COMMAND) ?: return null
-        
-        newEntity.copyPosition(oldEntity)
-        newEntity.yBodyRot = oldEntity.yBodyRot
-        newEntity.yHeadRot = oldEntity.yHeadRot
-        
-        level.addFreshEntity(newEntity)
-        oldEntity.discard()
-        
-        // Update our tracking maps
-        val ownerUUID = transformedEntities.entries.find { it.value == oldEntity }?.key
-        if (ownerUUID != null) {
-            transformedEntities[ownerUUID] = newEntity
-            val player = level.server?.playerList?.getPlayer(ownerUUID)
-            if (player != null) {
-                player.setCamera(newEntity)
-                AeonisNetwork.setControlledEntity(player, newEntity.id, player.inventory.selectedSlot)
-                syncControllingPlayers(player)
-                // Keep NoAI off for movement; AI is suppressed while controlled via mixin.
-                newEntity.setNoAi(false)
-            }
-        }
-        
-        return newEntity
-    }
+    /** Accepts variants separated by spaces or commas so both styles work. */
+    private fun parseVariants(raw: String): List<String> =
+        raw.split(' ', ',').map { it.trim() }.filter { it.isNotEmpty() }
 
+    /**
+     * Tab completion for variants. The argument is greedy, so the token under the cursor is
+     * resolved and only that token is rewritten; tokens already used are filtered out.
+     */
+    private val variantSuggester =
+        com.mojang.brigadier.suggestion.SuggestionProvider<CommandSourceStack> { ctx, builder ->
+            val offsetInInput = builder.start
+            val text = builder.input.substring(offsetInInput)
+            val lastBreak = text.lastIndexOfAny(charArrayOf(' ', ','))
+            val prefix = if (lastBreak >= 0) text.substring(lastBreak + 1) else text
+            val tokenStart = offsetInInput + (if (lastBreak >= 0) lastBreak + 1 else 0)
+            val alreadyUsed = parseVariants(if (lastBreak >= 0) text.substring(0, lastBreak) else "")
+                .map { it.lowercase() }
+                .toSet()
+
+            val level = ctx.source.level
+            val entityType = try {
+                ResourceArgument.getSummonableEntityType(ctx, "entity").value() as? EntityType<*>
+            } catch (_: Exception) {
+                null
+            }
+            val ids = if (entityType != null && level is ServerLevel) {
+                TransformService.variantsFor(level, entityType).map { it.id }
+            } else {
+                MobVariants.allIds()
+            }
+
+            val target = builder.createOffset(tokenStart)
+            ids.asSequence()
+                .filter { it.startsWith(prefix, ignoreCase = true) && it.lowercase() !in alreadyUsed }
+                .sorted()
+                .take(40)
+                .forEach { target.suggest(it) }
+            target.buildFuture()
+        }
 
     private fun untransform(ctx: CommandContext<CommandSourceStack>): Int {
         val source = ctx.source
@@ -1442,14 +1099,12 @@ object AeonisCommands {
             source.sendFailure(Component.literal("§cOnly players can untransform!"))
             return 0
         }
-        
-        // Handle command-transform path
-        if (transformedEntities.containsKey(player.uuid) || AeonisNetwork.isPlayerTransformed(player.uuid)) {
-            autoUntransform(player, showMessage = true)
+
+        if (TransformService.untransform(player, showMessage = true)) {
             return 1
         }
 
-        // Handle possession-mode path
+        // Legacy body-swap path; AeonisPossession owns its own lifecycle.
         if (com.qc.aeonis.AeonisPossession.isActivelyPossessing(player.uuid)) {
             com.qc.aeonis.AeonisPossession.handleRelease(player, player.x, player.y, player.z)
             return 1
@@ -1458,71 +1113,14 @@ object AeonisCommands {
         source.sendFailure(Component.literal("§cYou're not transformed!"))
         return 0
     }
-    
-    /**
-     * Auto-untransform helper function - used both by command and automatic death detection
-     */
-    fun autoUntransform(player: ServerPlayer, showMessage: Boolean = false) {
-        // Support desynced states: cleanup should still run when network says transformed.
-        val entity = transformedEntities.remove(player.uuid)
-        val hadNetworkControl = AeonisNetwork.isPlayerTransformed(player.uuid)
-        if (entity == null && !hadNetworkControl) return
-        
-        // Stop controlling
-        AeonisNetwork.removeControlledEntity(player)
-        syncControllingPlayers(player)
-        
-        // Stop spectating (in case of spectator mode)
-        player.setCamera(player)
-        
-        // Restore visibility and collision
-        player.isInvisible = false
-        player.noPhysics = false
-        
-        // Restore original gamemode
-        val originalMode = originalGameModes.remove(player.uuid) ?: GameType.SURVIVAL
-        player.setGameMode(originalMode)
-        restoreFlightState(player, originalMode)
-        restoreOriginalMoveSpeed(player)
-        
-        // IMPORTANT: Reset player health to default (20.0 / 10 hearts)
-        player.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH)?.baseValue = 20.0
-        player.health = 20.0f
-        
-        // Teleport player to entity's last position (if entity still exists)
-        if (entity != null && entity.isAlive) {
-            player.teleportTo(entity.x, entity.y, entity.z)
-            // Kill the spawned entity
-            entity.discard()
-        } else {
-            // If the transformed mob already died/despawned, force a safe anchor reset on the player.
-            player.teleportTo(player.x, player.y, player.z)
-        }
 
-        // Hard reset status flags to avoid the post-death soft-lock bug in transform mode.
-        soulModePlayers.remove(player.uuid)
-        player.noPhysics = false
-        player.fallDistance = 0.0
-        
-        if (showMessage) {
-            player.sendSystemMessage(Component.literal("§a✨ You returned to your normal form!"))
-        }
-    }
-
-    private fun restoreFlightState(player: ServerPlayer, gameType: GameType) {
-        if (gameType == GameType.CREATIVE || gameType == GameType.SPECTATOR) {
-            player.abilities.mayfly = true
-        } else {
-            player.abilities.mayfly = false
-            player.abilities.flying = false
-        }
-        player.onUpdateAbilities()
-    }
-    
     // ========== SOUL MODE ==========
-    
+
     /**
-     * Enter soul mode - become a spectator that can possess existing mobs with P key
+     * Soul mode - a spectator state where the player can possess an existing mob.
+     *
+     * Its restore snapshot is held by [SoulMode] rather than sharing the transform gamemode map,
+     * which is what previously let a transform restore the wrong mode after a possession.
      */
     private fun enterSoulMode(ctx: CommandContext<CommandSourceStack>): Int {
         val source = ctx.source
@@ -1530,127 +1128,66 @@ object AeonisCommands {
             source.sendFailure(Component.literal("§cOnly players can use soul mode!"))
             return 0
         }
-        
-        // Check if already transformed
-        if (AeonisNetwork.isPlayerTransformed(player.uuid)) {
+
+        if (TransformService.isTransformed(player)) {
             source.sendFailure(Component.literal("§cYou're already controlling a mob! Use /untransform first."))
             return 0
         }
-        
-        // Check if already in soul mode
-        if (soulModePlayers.contains(player.uuid)) {
+
+        if (!SoulMode.enter(player)) {
             source.sendFailure(Component.literal("§cYou're already in soul mode! Use /aeonis unsoul to exit."))
             return 0
         }
-        
-        // Store original gamemode
-        originalGameModes[player.uuid] = player.gameMode.gameModeForPlayer
-        
-        // Set to spectator
+
         player.setGameMode(GameType.SPECTATOR)
-        
-        // Add to soul mode set
-        soulModePlayers.add(player.uuid)
-        
-        // Notify client they're in soul mode
         AeonisNetwork.sendSoulModeStatus(player, true)
-        
-        source.sendSuccess({ 
-            Component.literal("§b👻 Soul Mode activated! §7Look at any mob and press §eP§7 to possess it. Use §e/aeonis unsoul§7 to exit.") 
+        source.sendSuccess({
+            Component.literal("§bSoul Mode activated! §7Look at any mob and press §eP§7 to possess it. Use §e/aeonis unsoul§7 to exit.")
         }, false)
         return 1
     }
-    
-    /**
-     * Exit soul mode - return to normal
-     */
+
+    /** Exit soul mode - return to normal. */
     private fun exitSoulMode(ctx: CommandContext<CommandSourceStack>): Int {
         val source = ctx.source
         val player = source.player as? ServerPlayer ?: run {
             source.sendFailure(Component.literal("§cOnly players can exit soul mode!"))
             return 0
         }
-        
-        // Check if in soul mode
-        if (!soulModePlayers.contains(player.uuid)) {
+
+        val restore = SoulMode.leave(player.uuid) ?: run {
             source.sendFailure(Component.literal("§cYou're not in soul mode!"))
             return 0
         }
-        
-        // Remove from soul mode
-        soulModePlayers.remove(player.uuid)
-        
-        // Restore original gamemode
-        val originalMode = originalGameModes.remove(player.uuid) ?: GameType.SURVIVAL
-        player.setGameMode(originalMode)
-        
-        // Notify client they're no longer in soul mode
+
+        restore.applyTo(player)
         AeonisNetwork.sendSoulModeStatus(player, false)
-        
-        source.sendSuccess({ Component.literal("§a✨ Soul mode deactivated!") }, false)
+        source.sendSuccess({ Component.literal("§aSoul mode deactivated!") }, false)
         return 1
     }
-    
+
+    /** Check if player is in soul mode. */
+    fun isInSoulMode(playerUuid: java.util.UUID): Boolean = SoulMode.isActive(playerUuid)
+
     /**
-     * Check if player is in soul mode
-     */
-    fun isInSoulMode(playerUuid: java.util.UUID): Boolean {
-        return soulModePlayers.contains(playerUuid)
-    }
-    
-    /**
-     * Called when player possesses an existing mob from soul mode
+     * Called when a player possesses an existing mob from soul mode. Delegated to the service so
+     * the resulting session behaves exactly like a spawned-body transform.
      */
     fun possessExistingMob(player: ServerPlayer, mob: Mob) {
-        // Remove from soul mode set (no longer in spectator possess mode)
-        soulModePlayers.remove(player.uuid)
-        
-        // Store original gamemode if not already stored
-        if (!originalGameModes.containsKey(player.uuid)) {
-            originalGameModes[player.uuid] = GameType.SURVIVAL
+        when (val result = TransformService.possess(player, mob)) {
+            is TransformResult.Success -> {
+                val entityName = mob.type.description.string
+                player.sendSystemMessage(
+                    Component.literal("§aYou possessed a §b$entityName§a! Use WASD to move, §e/untransform§a to release.")
+                )
+                result.loadout?.let { kit ->
+                    player.sendSystemMessage(Component.literal("§7[Aeonis] §aStarting kit: §e$kit"))
+                }
+            }
+            is TransformResult.Rejected -> player.sendSystemMessage(Component.literal("§c${result.reason}"))
+            is TransformResult.Failed -> player.sendSystemMessage(Component.literal("§c${result.reason}"))
         }
-        cacheOriginalMoveSpeed(player)
-        
-        // Track the entity
-        transformedEntities[player.uuid] = mob
-        
-        // Keep NoAI off for movement; AI is suppressed while controlled via mixin.
-        mob.setNoAi(false)
-        
-        // Special handling for Ender Dragon
-        if (mob is EnderDragon) {
-            mob.phaseManager.setPhase(EnderDragonPhase.HOVERING)
-            mob.setNoAi(false)
-        }
-        
-        // Register entity for control
-        AeonisNetwork.setControlledEntity(player, mob.id, player.inventory.selectedSlot)
-        syncControllingPlayers(player)
-        
-        // Auto-equip weapons for ranged mobs
-        equipWeaponsForRangedMob(mob, player)
-        
-        // Set player to survival and invisible
-        player.setGameMode(GameType.SURVIVAL)
-        player.isInvisible = true
-        
-        // Set player health to match mob health
-        val mobMaxHealth = mob.maxHealth.toDouble()
-        player.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH)?.baseValue = mobMaxHealth
-        player.health = mob.health.coerceAtMost(mobMaxHealth.toFloat())
-        
-        // Teleport player to mob
-        player.teleportTo(mob.x, mob.y, mob.z)
-        
-        // Notify client they're no longer in soul mode (now controlling)
-        AeonisNetwork.sendSoulModeStatus(player, false)
-        
-        val entityName = mob.type.description.string
-        player.sendSystemMessage(
-            Component.literal("§a👻 You possessed a §b$entityName§a! Use WASD to move, §e/untransform§a to release.")
-        )
     }
-    
     private fun smitePlayer(ctx: CommandContext<CommandSourceStack>): Int {
         val targets = EntityArgument.getPlayers(ctx, "targets")
         var count = 0
@@ -1954,17 +1491,15 @@ object AeonisCommands {
         return count
     }
 
-    private fun forcePlayerTransform(target: ServerPlayer, entityType: EntityType<*>, variants: List<String> = emptyList()): Boolean {
-        if (AeonisNetwork.isPlayerTransformed(target.uuid)) {
-            autoUntransform(target, showMessage = false)
-        }
-
-        val entityId = BuiltInRegistries.ENTITY_TYPE.getKey(entityType).toString()
-        val source = target.createCommandSourceStack().withPermission(net.minecraft.server.permissions.LevelBasedPermissionSet.GAMEMASTER)
-        val variantSuffix = if (variants.isEmpty()) "" else " " + variants.joinToString(" ")
-        (target.level() as net.minecraft.server.level.ServerLevel).server.commands.performPrefixedCommand(source, "transform $entityId$variantSuffix")
-        return transformedEntities.containsKey(target.uuid)
-    }
+    /**
+     * Programmatic transform used by the random/theme/roulette pools and /prank morph.
+     *
+     * This used to synthesise a `transform ...` string and feed it back through the command
+     * dispatcher, which made those commands depend on the command layer's parsing and
+     * permissions. It now calls the service directly.
+     */
+    private fun forcePlayerTransform(target: ServerPlayer, entityType: EntityType<*>, variants: List<String> = emptyList()): Boolean =
+        TransformService.replaceTransform(target, entityType, variants).isSuccess
 
     private fun buildFunTransformPool(): List<EntityType<*>> {
         return BuiltInRegistries.ENTITY_TYPE
@@ -1979,9 +1514,7 @@ object AeonisCommands {
             .take(40)
     }
 
-    private fun isCubeStyleMob(entity: Entity): Boolean {
-        return entity is Slime || isSulfurCube(entity)
-    }
+    private fun isCubeStyleMob(entity: Entity): Boolean = entity is Mob && MobKinds.isCubeStyle(entity)
     
     // ========== TRANSFORM ABILITIES ==========
     
@@ -2387,7 +1920,7 @@ object AeonisCommands {
         val difficulty = server.worldData.difficulty.displayName.string
         
         // Active Aeonis systems
-        val transformedCount = transformedEntities.size
+        val transformedCount = TransformSessions.count()
         val activeVexes = petVexOwners.size
         val activeThunder = activeThunderDomes.size
         val activeDirector = actorWalkTargets.size + actorLookTargets.size + actorAttackTargets.size
@@ -2546,36 +2079,22 @@ object AeonisCommands {
             source.sendFailure(Component.literal("§cOnly players can use this!"))
             return 0
         }
-        
-        // Check if transformed
-        val entity = transformedEntities.remove(player.uuid)
-        if (entity == null) {
+
+        if (!TransformService.isTransformed(player)) {
             source.sendFailure(Component.literal("§cYou're not transformed!"))
             return 0
         }
-        
-        // Stop controlling
-        AeonisNetwork.removeControlledEntity(player)
-        syncControllingPlayers(player)
-        
-        // Stop spectating
-        player.setCamera(player)
-        
-        // Remove tracked original gamemode since we're using explicit mode
-        originalGameModes.remove(player.uuid)
-        
-        // Set to requested gamemode
+
+        // Reuse the normal restore path (visibility, health, flight, camera, mob removal), then
+        // layer the explicitly requested gamemode on top. Duplicating the cleanup here is how
+        // /event exitbody drifted out of sync with /untransform in the first place.
+        TransformService.untransform(player, showMessage = false, carryDamage = false)
         player.setGameMode(targetMode)
-        
-        // Teleport player to entity's last position before killing it
-        player.teleportTo(entity.x, entity.y, entity.z)
-        
-        // Kill the spawned entity
-        entity.discard()
-        
+        player.onUpdateAbilities()
+
         val modeName = if (targetMode == GameType.SURVIVAL) "Survival" else "Creative"
-        source.sendSuccess({ 
-            Component.literal("§a✨ Exited body! Now in $modeName mode.") 
+        source.sendSuccess({
+            Component.literal("§a✨ Exited body! Now in $modeName mode.")
         }, true)
         return 1
     }
@@ -2583,39 +2102,23 @@ object AeonisCommands {
     private fun makeChaotic(ctx: CommandContext<CommandSourceStack>): Int {
         val targets = EntityArgument.getEntities(ctx, "targets")
         var count = 0
-        
-        // Reflection to access goalSelector
-        var goalSelectorField: java.lang.reflect.Field? = null
-        try {
-            // Try mapped name first
-            goalSelectorField = Mob::class.java.getDeclaredField("goalSelector")
-        } catch (e: NoSuchFieldException) {
-             // Fallback: find by type (first one is usually goalSelector)
-             goalSelectorField = Mob::class.java.declaredFields.find { it.type == net.minecraft.world.entity.ai.goal.GoalSelector::class.java }
-        }
-        goalSelectorField?.isAccessible = true
-        
+
         for (entity in targets) {
             if (entity is PathfinderMob) {
-                try {
-                    val goalSelector = goalSelectorField?.get(entity) as? net.minecraft.world.entity.ai.goal.GoalSelector
-                    
-                    if (goalSelector != null) {
-                        // Add chaotic goals with high priority (0 and 1)
-                        goalSelector.addGoal(0, SuicidalLavaGoal(entity))
-                        goalSelector.addGoal(1, CliffJumpGoal(entity))
-                        goalSelector.addGoal(2, CrazySpinGoal(entity))
-                        
-                        // Add speed effect to make it funnier
-                        entity.addEffect(MobEffectInstance(MobEffects.SPEED, Int.MAX_VALUE, 2))
-                        count++
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                // Mob#getGoalSelector is public in 26.3, so no reflection is needed at all.
+                val selector = entity.goalSelector
+                val goals = listOf(SuicidalLavaGoal(entity), CliffJumpGoal(entity), CrazySpinGoal(entity))
+                goals.forEachIndexed { priority, goal -> selector.addGoal(priority, goal) }
+
+                // Track exactly what was added per entity. The previous implementation never
+                // recorded anything, so /ai chaotic stop always reported 0 and did nothing.
+                chaoticGoals.getOrPut(entity.id) { mutableListOf() }.addAll(goals)
+                chaoticEntities.add(entity.id)
+                entity.addEffect(MobEffectInstance(MobEffects.SPEED, Int.MAX_VALUE, 2))
+                count++
             }
         }
-        
+
         ctx.source.sendSuccess({ Component.literal("§c🤪 Made $count entities chaotic!") }, true)
         return count
     }

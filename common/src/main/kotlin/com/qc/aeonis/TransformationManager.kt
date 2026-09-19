@@ -1,78 +1,81 @@
 package com.qc.aeonis
 
-import com.qc.aeonis.command.AeonisCommands
 import com.qc.aeonis.network.AeonisNetwork
+import com.qc.aeonis.transform.TransformSessions
 import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerPlayer
-import net.minecraft.server.level.ServerLevel
 import net.minecraft.util.Mth
-import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.Mob
 import net.minecraft.world.entity.ai.attributes.Attributes
+import net.minecraft.world.level.GameType
 
+/**
+ * Per-tick movement and appearance sync between a controlling player and the mob they occupy.
+ *
+ * Ownership and restore state are read from [AeonisNetwork] and [TransformSessions] rather than
+ * from command-object maps, so this loop can no longer disagree with the transform lifecycle
+ * about who is transformed or what their original gamemode was.
+ */
 object TransformationManager {
+
+    private fun controlledMob(player: ServerPlayer): Mob? {
+        val entityId = AeonisNetwork.getControlledEntityId(player.uuid) ?: return null
+        return player.level().getEntity(entityId) as? Mob
+    }
 
     fun tickStart(server: MinecraftServer) {
         for (player in server.playerList.players) {
             if (!AeonisNetwork.isPlayerTransformed(player.uuid)) continue
-            val entityId = AeonisNetwork.getControlledEntityId(player.uuid) ?: continue
-            val level = player.level()
-            val mob = level.getEntity(entityId) as? Mob ?: continue
+            val mob = controlledMob(player) ?: continue
             val input = AeonisNetwork.getLatestControlInput(player.uuid)
 
+            // The mob is driven by player input, never by its own navigator.
             mob.navigation.stop()
-            val liveMobSpeed = mob.getAttributeValue(Attributes.MOVEMENT_SPEED).toFloat()
-            mob.setSpeed(liveMobSpeed)
+            mob.setSpeed(mob.getAttributeValue(Attributes.MOVEMENT_SPEED).toFloat())
 
-            if (input != null) {
-                val mag = kotlin.math.sqrt(input.forward * input.forward + input.strafe * input.strafe)
-                if (mag > 0.001f) {
-                    mob.setZza(input.forward / mag)
-                    mob.setXxa(input.strafe / mag)
-                } else {
-                    mob.setZza(0.0f)
-                    mob.setXxa(0.0f)
-                }
-
-                (mob as? LivingEntity)?.setJumping(input.jump)
-                
-                if (AeonisNetwork.canMobFly(mob)) {
-                    mob.setYya(
-                        when {
-                            input.jump -> 1.0f
-                            input.sneak -> -1.0f
-                            else -> 0.0f
-                        }
-                    )
-                    // Drive vertical velocity directly for flying mobs
-                    val currY = mob.deltaMovement.y
-                    val targetY = when {
-                        input.jump -> 0.34
-                        input.sneak -> -0.26
-                        else -> 0.0
-                    }
-                    val smoothedY = currY + (targetY - currY) * 0.32
-                    mob.setDeltaMovement(
-                        mob.deltaMovement.x,
-                        smoothedY.coerceIn(-0.6, 0.6),
-                        mob.deltaMovement.z
-                    )
-                } else if (mob.isInWater && mob.canBreatheUnderwater()) {
-                    mob.setYya(
-                        when {
-                            input.jump -> 1.0f
-                            input.sneak -> -1.0f
-                            else -> 0.0f
-                        }
-                    )
-                } else {
-                    mob.setYya(0.0f)
-                }
-            } else {
+            if (input == null) {
                 mob.setZza(0.0f)
                 mob.setXxa(0.0f)
                 mob.setYya(0.0f)
-                (mob as? LivingEntity)?.setJumping(false)
+                mob.setJumping(false)
+                continue
+            }
+
+            val magnitude = kotlin.math.sqrt(input.forward * input.forward + input.strafe * input.strafe)
+            if (magnitude > 0.001f) {
+                mob.setZza(input.forward / magnitude)
+                mob.setXxa(input.strafe / magnitude)
+            } else {
+                mob.setZza(0.0f)
+                mob.setXxa(0.0f)
+            }
+            mob.setJumping(input.jump)
+
+            val vertical = when {
+                input.jump -> 1.0f
+                input.sneak -> -1.0f
+                else -> 0.0f
+            }
+            if (AeonisNetwork.canMobFly(mob)) {
+                mob.setYya(vertical)
+                // Flyers need their vertical velocity driven directly; setYya alone is ignored.
+                val currentY = mob.deltaMovement.y
+                val targetY = when {
+                    input.jump -> 0.34
+                    input.sneak -> -0.26
+                    else -> 0.0
+                }
+                val smoothedY = currentY + (targetY - currentY) * 0.32
+                mob.setDeltaMovement(
+                    mob.deltaMovement.x,
+                    smoothedY.coerceIn(-0.6, 0.6),
+                    mob.deltaMovement.z
+                )
+            } else if (mob.isInWater && mob.canBreatheUnderwater()) {
+                mob.setYya(vertical)
+            } else {
+                mob.setYya(0.0f)
             }
         }
     }
@@ -80,92 +83,84 @@ object TransformationManager {
     fun tickEnd(server: MinecraftServer) {
         for (player in server.playerList.players) {
             if (!AeonisNetwork.isPlayerTransformed(player.uuid)) continue
-            val entityId = AeonisNetwork.getControlledEntityId(player.uuid) ?: continue
-            val level = player.level()
-            val mob = level.getEntity(entityId)
-            
-            if (mob == null || !mob.isAlive) {
-                AeonisCommands.autoUntransform(player)
-                continue
-            }
+            val mob = controlledMob(player) ?: continue
 
-            AeonisCommands.cacheOriginalMoveSpeed(player)
-            if (mob is LivingEntity) {
-                val liveMobSpeed = mob.getAttributeValue(Attributes.MOVEMENT_SPEED)
-                val targetSpeed = if (liveMobSpeed > 0.0) liveMobSpeed else 0.1
-                player.getAttribute(Attributes.MOVEMENT_SPEED)?.baseValue = targetSpeed
-            }
-            
-            // Smooth sync player to mob
+            // Mirror the mob's movement speed onto the player so their own movement feels right
+            // when the session is later restored.
+            val mobSpeed = mob.getAttributeValue(Attributes.MOVEMENT_SPEED)
+            player.getAttribute(Attributes.MOVEMENT_SPEED)?.baseValue = if (mobSpeed > 0.0) mobSpeed else 0.1
+
+            // Keep the player glued to the mob, tightening the blend as the gap grows so a
+            // fast-moving form does not visibly lag behind its own body.
             val dx = mob.x - player.x
             val dy = mob.y - player.y
             val dz = mob.z - player.z
-            val distSqr = dx * dx + dy * dy + dz * dz
-            val posBlend = when {
-                distSqr > 36.0 -> 1.0f
-                distSqr > 9.0 -> 0.75f
+            val distanceSqr = dx * dx + dy * dy + dz * dz
+            val blend = when {
+                distanceSqr > 36.0 -> 1.0f
+                distanceSqr > 9.0 -> 0.75f
                 else -> 0.42f
             }
             player.setPos(
-                Mth.lerp(posBlend, player.x.toFloat(), mob.x.toFloat()).toDouble(),
-                Mth.lerp(posBlend, player.y.toFloat(), mob.y.toFloat()).toDouble(),
-                Mth.lerp(posBlend, player.z.toFloat(), mob.z.toFloat()).toDouble()
+                Mth.lerp(blend, player.x.toFloat(), mob.x.toFloat()).toDouble(),
+                Mth.lerp(blend, player.y.toFloat(), mob.y.toFloat()).toDouble(),
+                Mth.lerp(blend, player.z.toFloat(), mob.z.toFloat()).toDouble()
             )
 
-            val prevYaw = mob.yRot
-            val desiredYaw = player.yRot
-            val smoothedYaw = Mth.rotLerp(0.45f, prevYaw, desiredYaw)
+            val previousYaw = mob.yRot
+            val smoothedYaw = Mth.rotLerp(0.45f, previousYaw, player.yRot)
             mob.setYRot(smoothedYaw)
             mob.setYHeadRot(smoothedYaw)
-            if (mob is LivingEntity) {
-                mob.yBodyRot = Mth.rotLerp(0.35f, mob.yBodyRot, smoothedYaw)
-                
-                // Sync mob equipment with player's held items
-                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, player.mainHandItem.copy())
-                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND, player.offhandItem.copy())
-                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD, player.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).copy())
-                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST, player.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST).copy())
-                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.LEGS, player.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.LEGS).copy())
-                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.FEET, player.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.FEET).copy())
-                
-                // Sync health
-                val mobMaxHealth = mob.maxHealth.toDouble()
-                player.getAttribute(Attributes.MAX_HEALTH)?.baseValue = mobMaxHealth
-                if (mob.health < player.health) {
-                    player.health = mob.health
-                }
-
-                // Animation speed sync
-                val mobHorizontalSpeed = kotlin.math.sqrt(
-                    (mob.x - mob.xo) * (mob.x - mob.xo) +
-                    (mob.z - mob.zo) * (mob.z - mob.zo)
-                ).toFloat()
-                val animSpeed = (mobHorizontalSpeed * 7.2f).coerceIn(0.0f, 2.6f)
-                mob.walkAnimation.setSpeed(animSpeed)
-            }
-            
+            mob.yBodyRot = Mth.rotLerp(0.35f, mob.yBodyRot, smoothedYaw)
             mob.setXRot(player.xRot)
-            mob.yRotO = prevYaw
+            mob.yRotO = previousYaw
+
+            // Mirror the player's equipment onto the mob so the model shows what they hold.
+            for (slot in EQUIPMENT_SLOTS) {
+                mob.setItemSlot(slot, player.getItemBySlot(slot).copy())
+            }
+
+            // Health is shared: the mob owns it, the player's bar reflects it.
+            val mobMaxHealth = mob.maxHealth.toDouble()
+            player.getAttribute(Attributes.MAX_HEALTH)?.baseValue = mobMaxHealth
+            if (mob.health < player.health) {
+                player.health = mob.health
+            }
+
+            val horizontalSpeed = kotlin.math.sqrt(
+                (mob.x - mob.xo) * (mob.x - mob.xo) +
+                    (mob.z - mob.zo) * (mob.z - mob.zo)
+            ).toFloat()
+            mob.walkAnimation.setSpeed((horizontalSpeed * 7.2f).coerceIn(0.0f, 2.6f))
+
             player.setDeltaMovement(mob.deltaMovement.multiply(0.85, 1.0, 0.85))
 
-            // Handle flight
-            if (mob is Mob && AeonisNetwork.canMobFly(mob)) {
+            // Flight is granted only for forms that can actually fly, and never taken away from a
+            // player who is entitled to it by their original gamemode.
+            if (AeonisNetwork.canMobFly(mob)) {
                 player.abilities.mayfly = true
                 player.abilities.flying = true
                 player.onUpdateAbilities()
             } else {
-                val originalMode = AeonisCommands.getOriginalGameMode(player.uuid)
-                if (originalMode != net.minecraft.world.level.GameType.CREATIVE && originalMode != net.minecraft.world.level.GameType.SPECTATOR) {
+                val originalMode = TransformSessions.get(player.uuid)?.restore?.gameMode
+                if (originalMode != GameType.CREATIVE && originalMode != GameType.SPECTATOR) {
                     player.abilities.mayfly = false
                     player.abilities.flying = false
                     player.onUpdateAbilities()
                 }
             }
-            
-            if (!player.isInvisible) {
-                player.isInvisible = true
-            }
+
+            player.isInvisible = true
             player.noPhysics = false
         }
     }
+
+    private val EQUIPMENT_SLOTS = arrayOf(
+        EquipmentSlot.MAINHAND,
+        EquipmentSlot.OFFHAND,
+        EquipmentSlot.HEAD,
+        EquipmentSlot.CHEST,
+        EquipmentSlot.LEGS,
+        EquipmentSlot.FEET
+    )
 }

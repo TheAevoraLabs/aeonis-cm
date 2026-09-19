@@ -9,40 +9,47 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import net.minecraft.world.entity.EntityTypes
 
+/**
+ * Authoritative registry of which player is controlling which entity.
+ *
+ * Lookups are hit every tick per controlled mob from the loader mixins, so both directions are
+ * kept as direct map entries. Reverse lookups used to scan all values linearly, which is fine
+ * for one morphed player and quadratic for a server full of them.
+ */
 object AeonisNetwork {
     private val controlledEntities = ConcurrentHashMap<UUID, Int>()
+    private val entityToOwner = ConcurrentHashMap<Int, UUID>()
     private val latestControlInputs = ConcurrentHashMap<UUID, MobControlPayload>()
 
     fun isPlayerTransformed(uuid: UUID): Boolean = controlledEntities.containsKey(uuid)
     fun getControlledEntityId(uuid: UUID): Int? = controlledEntities[uuid]
     fun getLatestControlInput(uuid: UUID): MobControlPayload? = latestControlInputs[uuid]
 
-    fun isEntityControlled(entityId: Int): Boolean {
-        return controlledEntities.values.contains(entityId)
-    }
+    fun isEntityControlled(entityId: Int): Boolean = entityToOwner.containsKey(entityId)
 
-    fun getControllingPlayerUuid(entityId: Int): UUID? {
-        return controlledEntities.entries.find { it.value == entityId }?.key
-    }
+    fun getControllingPlayerUuid(entityId: Int): UUID? = entityToOwner[entityId]
 
     fun getControlledEntitiesMap(): Map<UUID, Int> = controlledEntities
 
     fun setControlledEntity(player: ServerPlayer, entityId: Int, selectedSlot: Int = -1) {
-        controlledEntities[player.uuid] = entityId
+        controlledEntities.put(player.uuid, entityId)?.let { previous ->
+            if (previous != entityId) entityToOwner.remove(previous)
+        }
+        entityToOwner[entityId] = player.uuid
         // Platform specific packet sending will be handled by a helper
         com.qc.aeonis.platform.Services.load(com.qc.aeonis.platform.INetworkHelper::class.java)
             .sendControlMode(player, true, entityId, selectedSlot)
     }
 
     fun removeControlledEntity(player: ServerPlayer) {
-        controlledEntities.remove(player.uuid)
+        controlledEntities.remove(player.uuid)?.let { entityToOwner.remove(it) }
         latestControlInputs.remove(player.uuid)
         com.qc.aeonis.platform.Services.load(com.qc.aeonis.platform.INetworkHelper::class.java)
             .sendControlMode(player, false, -1, -1)
     }
 
     fun clearControlState(uuid: UUID) {
-        controlledEntities.remove(uuid)
+        controlledEntities.remove(uuid)?.let { entityToOwner.remove(it) }
         latestControlInputs.remove(uuid)
     }
 
