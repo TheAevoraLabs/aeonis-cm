@@ -47,4 +47,8 @@ class NeoForgeNetworkHelper : INetworkHelper {
             provider, model, hasApiKey, temperature, maxTokens, maxBlocksPerMinute, maxEditRadius, griefProtection
         )))
     }
+
+    override fun sendCompanionDialogue(player: ServerPlayer, speakerName: String, message: String, emotion: String) {
+        player.connection.send(net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket(com.qc.aeonis.network.CompanionDialoguePayload(speakerName, message, emotion)))
+    }
 }

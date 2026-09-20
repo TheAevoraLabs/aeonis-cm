@@ -172,3 +172,28 @@ data class SelectedSlotPayload(val slot: Int) : CustomPacketPayload {
     }
     override fun type() = ID
 }
+
+data class CompanionDialoguePayload(
+    val speakerName: String,
+    val message: String,
+    val emotion: String = "FRIENDLY"
+) : CustomPacketPayload {
+    companion object {
+        val ID = CustomPacketPayload.Type<CompanionDialoguePayload>(Identifier.fromNamespaceAndPath("aeonis", "companion_dialogue"))
+        val CODEC: StreamCodec<RegistryFriendlyByteBuf, CompanionDialoguePayload> = StreamCodec.of(
+            { buf, p ->
+                buf.writeUtf(p.speakerName)
+                buf.writeUtf(p.message)
+                buf.writeUtf(p.emotion)
+            },
+            { buf ->
+                CompanionDialoguePayload(
+                    buf.readUtf(),
+                    buf.readUtf(),
+                    buf.readUtf()
+                )
+            }
+        )
+    }
+    override fun type() = ID
+}

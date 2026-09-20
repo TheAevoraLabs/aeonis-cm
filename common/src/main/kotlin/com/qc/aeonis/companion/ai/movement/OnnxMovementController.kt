@@ -102,15 +102,30 @@ class OnnxMovementController(
         localVoxelGrid125: FloatArray
     ): MotorAction {
         val distXZ = sqrt(relativeTarget.x * relativeTarget.x + relativeTarget.z * relativeTarget.z)
+
+        // Water is a separate motion regime, not a modifier on walking. Vertical movement
+        // there is owned by AquaticLocomotion (buoyancy), so this branch supplies only the
+        // horizontal stroke — deliberately never a jump, because jumping in water does
+        // nothing for a mob and would fight the buoyancy impulse.
+        if (inWater) {
+            if (distXZ < 0.25) return MotorAction(0f, 0f, jump = false, sprint = false, sneak = false)
+            return MotorAction(
+                moveForward = 1.0f,
+                moveStrafe = 0.0f,
+                jump = false,
+                sprint = distXZ > 6.0,
+                sneak = false
+            )
+        }
+
         if (distXZ < 0.25) {
             return MotorAction(0f, 0f, jump = false, sprint = false, sneak = false)
         }
 
         val shouldJump = (horizontalCollision && onGround) ||
-                (relativeTarget.y > 0.6 && distXZ < 2.0 && onGround) ||
-                inWater
+                (relativeTarget.y > 0.6 && distXZ < 2.0 && onGround)
 
-        val shouldSprint = distXZ > 3.5 && !horizontalCollision && !inWater
+        val shouldSprint = distXZ > 3.5 && !horizontalCollision
 
         val forward = 1.0f.coerceIn(-1f, 1f)
         val strafe = 0.0f

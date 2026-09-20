@@ -1,6 +1,7 @@
 package com.qc.aeonis.companion
 
 import com.qc.aeonis.companion.inventory.CompanionInventory
+import com.qc.aeonis.companion.profile.CompanionProfileManager
 import com.qc.aeonis.entity.CompanionBotEntity
 import net.minecraft.core.BlockPos
 import net.minecraft.network.chat.Component
@@ -28,23 +29,17 @@ object CompanionBotManager {
 
     fun register() {}
 
-    private fun saveBotState(record: BotRecord, bot: CompanionBotEntity) {
+    private fun saveBotState(server: MinecraftServer, record: BotRecord, bot: CompanionBotEntity, ownerUuid: UUID) {
         record.snapshot = bot.createSnapshot()
         record.savedInventory = (0 until CompanionInventory.CONTAINER_SIZE).map {
             bot.inventory.getItem(it).copy()
         }
         record.lastKnownDimension = bot.level().dimension()
+        CompanionProfileManager.saveBotToProfile(server, bot, ownerUuid)
     }
 
-    private fun restoreBotState(record: BotRecord, bot: CompanionBotEntity) {
-        record.snapshot?.let { bot.applySnapshot(it) }
-        record.savedInventory?.let { stacks ->
-            stacks.forEachIndexed { index, stack ->
-                if (index < CompanionInventory.CONTAINER_SIZE) {
-                    bot.inventory.setItem(index, stack.copy())
-                }
-            }
-        }
+    private fun restoreBotState(server: MinecraftServer, record: BotRecord, bot: CompanionBotEntity, ownerUuid: UUID) {
+        CompanionProfileManager.initializeBotFromProfile(server, bot, ownerUuid)
     }
 
     fun spawnOrReplace(owner: ServerPlayer): CompanionBotEntity? {
@@ -54,14 +49,14 @@ object CompanionBotManager {
 
         findTrackedBot(server, record)?.let { existing ->
             if (existing.isAlive) {
-                saveBotState(record, existing)
+                saveBotState(server, record, existing, owner.uuid)
             }
             existing.discard()
         }
 
         val spawnPos = owner.blockPosition()
         val bot = CompanionBotEntity.spawn(level, spawnPos, owner) ?: return null
-        restoreBotState(record, bot)
+        restoreBotState(server, record, bot, owner.uuid)
 
         record.entityId = bot.id
         record.entityUuid = bot.uuid
@@ -87,7 +82,10 @@ object CompanionBotManager {
         val record = ownerBots.remove(owner.uuid) ?: return false
         val level = owner.level()
         val bot = findTrackedBot(level.server, record)
-        bot?.discard()
+        if (bot != null && bot.isAlive) {
+            CompanionProfileManager.saveBotToProfile(level.server, bot, owner.uuid)
+            bot.discard()
+        }
         return true
     }
 
@@ -101,7 +99,7 @@ object CompanionBotManager {
         val server = player.level().server
         val bot = findTrackedBot(server, record)
         if (bot != null && bot.isAlive) {
-            saveBotState(record, bot)
+            saveBotState(server, record, bot, player.uuid)
             record.hasSavedOfflineBot = true
             bot.discard()
         }
@@ -112,13 +110,14 @@ object CompanionBotManager {
      * Automatically restores and respawns the companion with full inventory and stats.
      */
     fun onPlayerJoin(player: ServerPlayer) {
-        val record = ownerBots[player.uuid] ?: return
-        if (record.hasSavedOfflineBot) {
+        val server = player.level().server
+        val record = ownerBots.computeIfAbsent(player.uuid) { BotRecord() }
+        if (record.hasSavedOfflineBot || CompanionProfileManager.hasProfile(server, player.uuid)) {
             val level = player.level()
             val spawnPos = player.blockPosition()
             val bot = CompanionBotEntity.spawn(level, spawnPos, player)
             if (bot != null) {
-                restoreBotState(record, bot)
+                restoreBotState(server, record, bot, player.uuid)
                 record.entityId = bot.id
                 record.entityUuid = bot.uuid
                 record.hasSavedOfflineBot = false
@@ -137,7 +136,7 @@ object CompanionBotManager {
                 // Owner is offline: ensure any active bot in the world is safely saved & discarded
                 val orphanBot = findTrackedBot(server, record)
                 if (orphanBot != null && orphanBot.isAlive) {
-                    saveBotState(record, orphanBot)
+                    saveBotState(server, record, orphanBot, ownerUuid)
                     record.hasSavedOfflineBot = true
                     orphanBot.discard()
                 }
@@ -161,12 +160,12 @@ object CompanionBotManager {
             if (bot != null && bot.isAlive) {
                 // Dimension transfer: smoothly migrate bot and preserve full inventory
                 if (bot.level() != level) {
-                    saveBotState(record, bot)
+                    saveBotState(server, record, bot, ownerUuid)
                     bot.discard()
 
                     val transferPos = owner.blockPosition()
                     val transferred = CompanionBotEntity.spawn(level, transferPos, owner) ?: return@forEach
-                    restoreBotState(record, transferred)
+                    restoreBotState(server, record, transferred, ownerUuid)
                     record.entityId = transferred.id
                     record.entityUuid = transferred.uuid
                     record.lastKnownDimension = level.dimension()

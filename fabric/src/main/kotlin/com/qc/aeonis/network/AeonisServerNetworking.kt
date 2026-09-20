@@ -15,6 +15,7 @@ object AeonisServerNetworking {
         PayloadTypeRegistry.clientboundPlay().register(AeonisNetworking.SyncControllingPlayersPayload.ID, AeonisNetworking.SyncControllingPlayersPayload.CODEC)
         PayloadTypeRegistry.clientboundPlay().register(AeonisNetworking.ControlledEntityStatusPayload.ID, AeonisNetworking.ControlledEntityStatusPayload.CODEC)
         PayloadTypeRegistry.clientboundPlay().register(AeonisNetworking.OpenManhuntGuiPayload.ID, AeonisNetworking.OpenManhuntGuiPayload.CODEC)
+        PayloadTypeRegistry.clientboundPlay().register(CompanionDialoguePayload.ID, CompanionDialoguePayload.CODEC)
 
         // Register serverbound payloads
         PayloadTypeRegistry.serverboundPlay().register(MobControlPayload.ID, MobControlPayload.CODEC)

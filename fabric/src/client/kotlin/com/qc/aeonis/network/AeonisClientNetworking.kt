@@ -118,8 +118,18 @@ object AeonisClientNetworking {
             }
         }
 
+        // Handle companion dialogue HUD messages
+        ClientPlayNetworking.registerGlobalReceiver(CompanionDialoguePayload.ID) { payload, _ ->
+            com.qc.aeonis.companion.ui.CompanionSpeechState.push(
+                payload.speakerName,
+                payload.message,
+                payload.emotion
+            )
+        }
+
         // Register tick event to send movement inputs
         ClientTickEvents.END_CLIENT_TICK.register { client ->
+            com.qc.aeonis.companion.ui.CompanionSpeechState.tick()
             if (isControlling && client.player != null && client.level != null) {
                 sendMovementInput(client)
             }

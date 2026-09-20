@@ -134,6 +134,11 @@ class AeonisNeoForge(bus: IEventBus) {
             registrar.playToClient(AeonisNetworking.ControlledEntityStatusPayload.ID, AeonisNetworking.ControlledEntityStatusPayload.CODEC) { payload, context ->
                 context.enqueueWork { AeonisClientNetworking.onControlledEntityStatus(payload) }
             }
+            registrar.playToClient(CompanionDialoguePayload.ID, CompanionDialoguePayload.CODEC) { payload, context ->
+                context.enqueueWork {
+                    com.qc.aeonis.neoforge.network.AeonisClientNetworking.onCompanionDialogue(payload)
+                }
+            }
             registrar.playToClient(LlmOpenGuiPayload.ID, LlmOpenGuiPayload.CODEC) { payload, context ->
                 context.enqueueWork {
                     Minecraft.getInstance().setScreenAndShow(com.qc.aeonis.neoforge.llm.screen.AeonisLlmConfigScreen(payload))

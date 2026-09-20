@@ -57,9 +57,14 @@ class AdaptiveLearningSkill : CompanionSkill {
         if (newLevel > memory.bondLevel) {
             memory.bondLevel = newLevel
             val owner = bot.getOwnerPlayer()
-            owner?.sendSystemMessage(
-                Component.literal("§a[Companion] §7Learning matrix upgraded to §bTier $newLevel§7! (Efficiency & range enhanced)")
-            )
+            if (owner != null) {
+                com.qc.aeonis.companion.ui.CompanionDialogueManager.speak(
+                    bot,
+                    owner,
+                    "Learning matrix upgraded to Tier $newLevel! (Efficiency & range enhanced)",
+                    "TASK"
+                )
+            }
         }
 
         return SkillResult(SkillStatus.SUCCESS, "Learning cycle updated (Bond Tier ${memory.bondLevel})", cooldownTicks = 100)

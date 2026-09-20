@@ -24,6 +24,10 @@ import com.qc.aeonis.companion.entity.CompanionPlayerSurrogate
 import com.qc.aeonis.companion.ai.observer.PlayerIntentObserver
 import com.qc.aeonis.companion.ai.observer.PlayerIntent
 import com.qc.aeonis.companion.ai.brain.CompanionBehaviorTree
+import com.qc.aeonis.companion.order.CompanionOrder
+import com.qc.aeonis.companion.order.CompanionOrderState
+import com.qc.aeonis.companion.order.WeaponSelector
+import com.qc.aeonis.companion.skill.ScaffoldingEngine
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier
 import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.entity.ai.goal.*
@@ -63,7 +67,18 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
                 .add(Attributes.STEP_HEIGHT, 1.25)
         }
 
-        data class CompanionSnapshot(val health: Float, val mode: Int)
+        /**
+         * Serialisable runtime state carried across recall, dimension change and respawn.
+         *
+         * [order] is a name rather than an ordinal so reordering [CompanionOrder] cannot
+         * silently reinterpret a saved companion's standing instruction. It defaults to
+         * FREE so existing two-argument call sites stay valid.
+         */
+        data class CompanionSnapshot(
+            val health: Float,
+            val mode: Int,
+            val order: String = CompanionOrder.FREE.name
+        )
         
         fun spawn(level: ServerLevel, pos: BlockPos, owner: ServerPlayer): CompanionBotEntity? {
             val bot = AeonisEntities.COMPANION_BOT.get().spawn(level, pos, EntitySpawnReason.COMMAND)
@@ -78,14 +93,49 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
     private var attackCooldown = 0
     private var blockPlaceCooldown = 0
     private var blockBreakCooldown = 0
+
+    /** Ticks between ordinary block placements (torches, scaffolds). */
+    private val blockPlaceCooldownTicks = 15
     private var currentBreakingPos: BlockPos? = null
     private var breakProgress = 0f
+
+    /** Live reference to the stack chosen for the in-progress break; null when idle. */
+    private var breakingTool: ItemStack? = null
     
     // True 33-slot Inventory & Player Surrogate Trampoline
     val inventory = CompanionInventory()
     private var surrogate: CompanionPlayerSurrogate? = null
     var brainTree: CompanionBehaviorTree? = null
     val skillManager = com.qc.aeonis.companion.skill.CompanionSkillManager(this)
+
+    /**
+     * Runtime order state: the player's standing instruction plus the governor's
+     * bodyguard latch. See [com.qc.aeonis.companion.order.OrderGovernor].
+     */
+    val orderState = CompanionOrderState()
+
+    /**
+     * Shared traversal-engineering helper.
+     *
+     * One instance per bot, created lazily: the engine holds climb intent (the tick its own
+     * pillar jump was issued) that must not be duplicated across callers, and building it
+     * only when first needed keeps entity construction free of world queries.
+     */
+    val scaffoldingEngine = ScaffoldingEngine(this)
+
+    /**
+     * The player's current instruction to this companion (`HOLD`, `FOLLOW`, `RETREAT`, …).
+     *
+     * Assigning this is the single supported way to change what the companion has been
+     * told to do: the setter also derives [forcedMode], so the legacy goal-selector paths
+     * and the order layer can never disagree about the standing instruction.
+     */
+    var currentOrder: CompanionOrder
+        get() = orderState.order
+        set(value) {
+            orderState.set(value, level().gameTime)
+            forcedMode = value.forcesLegacyMode
+        }
 
     fun getOrCreateSurrogate(): CompanionPlayerSurrogate? {
         val serverLevel = level() as? ServerLevel ?: return null
@@ -106,6 +156,9 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
 
     init {
         this.setPersistenceRequired()
+        // Vanilla mob navigation refuses to path through water unless floating is enabled,
+        // which is why the companion used to refuse to cross rivers at all.
+        this.navigation.setCanFloat(true)
     }
 
     override fun defineSynchedData(builder: SynchedEntityData.Builder) {
@@ -134,24 +187,33 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
         get() = ForcedMode.entries[entityData.get(FORCED_MODE)]
         set(value) = entityData.set(FORCED_MODE, value.ordinal)
 
+
     val currentState: ForcedMode get() = forcedMode
 
     override fun readAdditionalSaveData(input: ValueInput) {
         input.read("Owner", UUIDUtil.CODEC).ifPresent { ownerUuid = it }
-        forcedMode = ForcedMode.entries[input.getIntOr("ForcedMode", 0).coerceIn(0, ForcedMode.entries.size - 1)]
+        val order = CompanionOrder.parse(input.getStringOr("CompanionOrder", CompanionOrder.FREE.name))
+            ?: CompanionOrder.FREE
+        orderState.set(order, 0L)
+        // forcedMode is derived from the order, never read back independently, so a
+        // save/load cycle cannot desynchronise the two.
+        forcedMode = order.forcesLegacyMode
         inventory.load(input)
     }
 
     override fun addAdditionalSaveData(output: ValueOutput) {
         ownerUuid?.let { output.store("Owner", UUIDUtil.CODEC, it) }
+        output.putString("CompanionOrder", orderState.order.name)
         output.putInt("ForcedMode", forcedMode.ordinal)
         inventory.save(output)
     }
 
-    fun createSnapshot() = CompanionSnapshot(health, forcedMode.ordinal)
+    fun createSnapshot() = CompanionSnapshot(health, forcedMode.ordinal, orderState.order.name)
     fun applySnapshot(snapshot: CompanionSnapshot) {
         health = snapshot.health
-        forcedMode = ForcedMode.entries[snapshot.mode]
+        val order = CompanionOrder.parse(snapshot.order) ?: CompanionOrder.FREE
+        orderState.set(order, 0L)
+        forcedMode = order.forcesLegacyMode
     }
 
     fun getStrengthSummary(): String {
@@ -201,6 +263,11 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
 
     override fun remove(reason: Entity.RemovalReason) {
         super.remove(reason)
+        val srv = level().server
+        val ownerId = ownerUuid
+        if (srv != null && ownerId != null && reason != Entity.RemovalReason.KILLED) {
+            com.qc.aeonis.companion.profile.CompanionProfileManager.saveBotToProfile(srv, this, ownerId)
+        }
         brainTree?.close()
         brainTree = null
     }
@@ -319,25 +386,72 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
 
     fun isRetreating(): Boolean = forcedMode == ForcedMode.RUN_AWAY
 
-    fun tryPlaceBlock(pos: BlockPos, face: Direction = Direction.UP): Boolean {
+    /**
+     * Places an inventory block at [pos], accepting the first stack matching [filter].
+     *
+     * @param filter constrains which block is acceptable; the default takes anything.
+     */
+    fun tryPlaceBlock(
+        pos: BlockPos,
+        face: Direction = Direction.UP,
+        cooldownTicks: Int = blockPlaceCooldownTicks,
+        filter: (ItemStack) -> Boolean = { true }
+    ): Boolean {
+        val slot = firstSlotMatching(filter)
+        if (slot < 0) return false
+        return placeFromSlot(pos, slot, face, cooldownTicks)
+    }
+
+    /** First array-slot (hands included) whose stack satisfies [filter], or -1. */
+    fun firstSlotMatching(filter: (ItemStack) -> Boolean): Int {
+        for (slot in CompanionInventory.BACKPACK_START until CompanionInventory.CONTAINER_SIZE) {
+            val stack = inventory.getItem(slot)
+            if (!stack.isEmpty && filter(stack)) return slot
+        }
+        for (slot in 0 until CompanionInventory.BACKPACK_START) {
+            val stack = inventory.getItem(slot)
+            if (!stack.isEmpty && filter(stack)) return slot
+        }
+        return -1
+    }
+
+    /**
+     * Places the block held in [slot] at [pos].
+     *
+     * The stack is passed straight through to the surrogate, so vanilla's own stack
+     * decrement is the only consumption that happens; the slot is cleared only once the
+     * stack has actually been emptied. Getting this wrong is what previously let the bot
+     * place scaffolding without ever spending it.
+     */
+    fun placeFromSlot(pos: BlockPos, slot: Int, face: Direction = Direction.UP, cooldownTicks: Int = blockPlaceCooldownTicks): Boolean {
         if (blockPlaceCooldown > 0 || level().isClientSide) return false
         val serverLevel = level() as? ServerLevel ?: return false
-        if (!serverLevel.getBlockState(pos).isAir) return false
+        if (slot < 0 || slot >= CompanionInventory.CONTAINER_SIZE) return false
 
-        val playerSurrogate = getOrCreateSurrogate()
-        val blockStack = (CompanionInventory.BACKPACK_START until CompanionInventory.CONTAINER_SIZE)
-            .map { inventory.getItem(it) }
-            .firstOrNull { it.item is net.minecraft.world.item.BlockItem }
-            ?: return false
+        val target = serverLevel.getBlockState(pos)
+        if (!target.isAir && !target.canBeReplaced()) return false
 
-        val success = playerSurrogate?.placeBlock(pos, face, blockStack) ?: false
+        val stack = inventory.getItem(slot)
+        if (stack.isEmpty) return false
+
+        val playerSurrogate = getOrCreateSurrogate() ?: return false
+        val success = playerSurrogate.placeBlock(pos, face, stack)
         if (success) {
-            blockPlaceCooldown = 15
+            if (stack.isEmpty) inventory.setItem(slot, ItemStack.EMPTY)
+            inventory.setChanged()
+            blockPlaceCooldown = cooldownTicks
             level().playSound(null, pos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 1f, 1f)
         }
         return success
     }
 
+    /**
+     * Progressive block breaking, four ticks per block by default.
+     *
+     * The tool is chosen once when the target changes and is passed explicitly to the
+     * surrogate for the whole break, so durability lands on the tool that did the work
+     * instead of on whatever happened to be in the main hand.
+     */
     fun tryBreakBlock(pos: BlockPos): Boolean {
         if (blockBreakCooldown > 0 && currentBreakingPos != pos) return false
         val serverLevel = level() as? ServerLevel ?: return false
@@ -347,18 +461,18 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
         if (currentBreakingPos != pos) {
             currentBreakingPos = pos
             breakProgress = 0f
-            val bestTool = inventory.findBestTool(state)
-            if (bestTool != inventory.mainHandItem) {
-                inventory.mainHandItem = bestTool
-            }
+            breakingTool = inventory.findBestTool(state)
         }
 
         breakProgress += 0.25f
 
         if (breakProgress >= 1.0f) {
+            val tool = breakingTool ?: inventory.findBestTool(state)
             val playerSurrogate = getOrCreateSurrogate()
-            val success = playerSurrogate?.mineBlock(pos) ?: serverLevel.destroyBlock(pos, true, this)
+            val success = playerSurrogate?.mineBlock(pos, tool)
+                ?: serverLevel.destroyBlock(pos, true, this)
             currentBreakingPos = null
+            breakingTool = null
             breakProgress = 0f
             blockBreakCooldown = 10
             return success

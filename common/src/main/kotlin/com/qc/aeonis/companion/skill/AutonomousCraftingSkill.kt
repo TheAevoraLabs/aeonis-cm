@@ -1,6 +1,8 @@
 package com.qc.aeonis.companion.skill
 
 import com.qc.aeonis.companion.inventory.CompanionInventory
+import com.qc.aeonis.companion.order.WeaponSelector
+import com.qc.aeonis.companion.progression.CraftingTableUnlock
 import com.qc.aeonis.entity.CompanionBotEntity
 import net.minecraft.core.BlockPos
 import net.minecraft.sounds.SoundEvents
@@ -15,13 +17,21 @@ import net.minecraft.world.level.block.Blocks
  * Autonomous crafting skill enabling 2x2 hand-crafting (planks, sticks, torches, table)
  * and 3x3 table-crafting (bread, tools, gear) when a crafting table is nearby or in inventory.
  */
-class AutonomousCraftingSkill : CompanionSkill {
+class AutonomousCraftingSkill(private val tableUnlock: CraftingTableUnlock) : CompanionSkill {
     override val id: String = "autonomous_crafting"
     override val name: String = "Autonomous Crafting Engine"
     override val category: SkillCategory = SkillCategory.CRAFTING
     override val priority: Int = 60
 
     private var craftingCooldown: Int = 0
+
+    /**
+     * True once the player has crafted or placed a crafting table at least once.
+     *
+     * This is the hard gate on the crafting-table recipe; see [CraftingTableUnlock] for why it
+     * is a one-way latch rather than a live proximity test.
+     */
+    private fun tableKnowledgeGranted(): Boolean = tableUnlock.isUnlocked
 
     override fun canActivate(bot: CompanionBotEntity): Boolean {
         if (craftingCooldown > 0) return false
@@ -38,7 +48,9 @@ class AutonomousCraftingSkill : CompanionSkill {
         if (hasLogs) return true
         if (plankCount >= 2 && stickCount < 8) return true
         if (stickCount >= 1 && hasCoal && torchCount < 16) return true
-        if (plankCount >= 4 && !hasTable) return true
+        // Crafting a table of our own requires the player to have shown us one first. Without
+        // that, the companion waits rather than bootstrapping its own tool chain.
+        if (tableKnowledgeGranted() && plankCount >= 4 && !hasTable) return true
 
         // 2. Check 3x3 Table Crafting options
         val wheatCount = countItem(inv, Items.WHEAT)
@@ -48,6 +60,9 @@ class AutonomousCraftingSkill : CompanionSkill {
         if (!hasPickaxe && stickCount >= 2 && (plankCount >= 3 || countItem(inv, Items.COBBLESTONE) >= 3 || countItem(inv, Items.IRON_INGOT) >= 3)) {
             return true
         }
+
+        // A sword is the companion's hunting licence; it must never hunt bare-handed.
+        if (!WeaponSelector.hasMeleeWeapon(bot) && hasTable && stickCount >= 1 && plankCount >= 2) return true
 
         return false
     }
@@ -101,9 +116,10 @@ class AutonomousCraftingSkill : CompanionSkill {
             }
         }
 
-        // 4. Craft Crafting Table (4 Planks -> 1 Crafting Table if none available)
+        // 4. Craft Crafting Table (4 Planks -> 1 Crafting Table if none available).
+        //    Hard-gated on the player-first rule: see CraftingTableUnlock.
         val hasTable = countItem(inv, Items.CRAFTING_TABLE) > 0 || isCraftingTableNearby(bot)
-        if (!hasTable && plankCount >= 4) {
+        if (tableKnowledgeGranted() && !hasTable && plankCount >= 4) {
             if (consumeFromTag(inv, ItemTags.PLANKS, 4)) {
                 inv.collectDrop(ItemStack(Items.CRAFTING_TABLE, 1))
                 inv.setChanged()
@@ -125,7 +141,18 @@ class AutonomousCraftingSkill : CompanionSkill {
             }
         }
 
-        // 6. 3x3 Table Crafting: Tools (Pickaxe)
+        // 6. 3x3 Table Crafting: a melee weapon when the companion has none. This is what turns
+        //    "cannot hunt because it would be punching" into "crafts a sword, then hunts".
+        if (!WeaponSelector.hasMeleeWeapon(bot) && hasTable && stickCount >= 1 && plankCount >= 2) {
+            if (consumeFromTag(inv, ItemTags.PLANKS, 2) && consumeItem(inv, Items.STICK, 1)) {
+                inv.collectDrop(ItemStack(Items.WOODEN_SWORD))
+                inv.setChanged()
+                playCraftSound(bot)
+                return SkillResult(SkillStatus.SUCCESS, "Crafted a Wooden Sword", cooldownTicks = 20)
+            }
+        }
+
+        // 7. 3x3 Table Crafting: Tools (Pickaxe)
         if (!hasTool(inv, ItemTags.PICKAXES) && hasTable && stickCount >= 2) {
             val ironCount = countItem(inv, Items.IRON_INGOT)
             val stoneCount = countItem(inv, Items.COBBLESTONE)

@@ -466,3 +466,99 @@ python3 scripts/mc-smoke-test.py     -> RESULT: PASS - reached the main menu
 
 Note that the 9.4.1 distribution listed in some notes is not used; the wrapper was
 moved to 9.5.1, which is what Fabric's own 26.3 example mod uses.
+
+## 10. Companion AI: behavioural hardening pass
+
+This pass addressed four field-reported companion failures. All of the behaviour below is
+implemented in `common/src/main/kotlin/com/qc/aeonis/companion/` and compiles on both
+loaders; none of it has been exercised against a live player yet (see "Verification" below).
+
+### Orders now outrank autonomy, in one place
+
+Before this pass, four systems each decided priority independently: the goal selector, the
+behaviour tree's root selector, the skill manager's static priority list, and the ping
+handler's direct blackboard writes. They disagreed, which is how the companion ended up
+hunting through a `HOLD` order.
+
+`order/OrderGovernor.kt` is now the single authority. It evaluates once per tick and returns
+a verdict whose mode is one of `BODYGUARD`, `PING_RESPONSE`, `ORDER_ENFORCED` or `AUTONOMY`;
+`preemptSkills` is true for everything except autonomy, and
+`CompanionSkillManager.tick()` *stops* the active skill on that condition rather than merely
+declining to start a new one. `order/CompanionOrder.kt` adds the order model
+(`FREE`/`FOLLOW`/`HOLD`/`GUARD`/`HUNT`/`ATTACK`/`RETREAT`) carried on
+`CompanionBotEntity.currentOrder`, persisted by name so a save cannot silently reinterpret a
+standing instruction. `/comp hold|follow|retreat|guard|hunt|attack|free` and
+`/comp order <name>` drive it; the legacy `/comp mode …` spellings are aliases onto the same
+state.
+
+**Interpretation to be aware of:** `HOLD`, `FOLLOW` and `RETREAT` suspend *all* autonomous
+skills, including feeding and scavenging, because that is what the requirement asked for
+literally. `FREE`, `GUARD` and `HUNT` are the orders that hand autonomy back.
+
+### Hunting is bounded and armed
+
+`HuntingFeedingSkill` gains a per-session quota (three animals), a hard weapon gate
+(`order/WeaponSelector.kt` — no sword or axe anywhere means no hunt, and the refusal is
+reported), and a preemption check at the top of `canActivate` *and* `tick`. The quota clears
+only when the session's food has actually been handed over, which is the part that prevents
+the original infinite loop. The weapon ranking is an explicit effective-DPS table
+(`damage / cooldown`), with a durability factor so a nearly-broken diamond sword still
+outranks a fresh stone one.
+
+### Locomotion: no more zigzag, and water is a route
+
+`ai/movement/WaypointStringPuller.kt` does greedy raycast shortcut pruning on A* output, so a
+staircase collapses to a straight diagonal whenever the line is walkable. The walkability
+probe allows ±1 elevation per sampled step, which is what makes a smooth diagonal *up* a
+slope safe while still refusing to shortcut a two-block ledge. Non-`WALK` actions are hard
+anchors: they can neither be pruned nor skipped over.
+
+Three secondary zigzag sources were also removed: replans are now suppressed unless the
+destination has moved more than two blocks, `jumpFromGround()` replaces the flag-based jump
+control on the drive path, and `PathNavigation.setCanFloat(true)` was enabled — without it
+the vanilla navigator refused water outright, which is the actual reason the companion could
+not cross a river. `ai/movement/AquaticLocomotion.kt` adds buoyancy (the specified +0.08
+impulse, halved at the surface, clamped to +0.16 so it cannot breach) and a capped horizontal
+stroke; `driveMovement` returns early in water so the walking pipeline cannot fight it.
+
+### Traversal engineering, and an inventory duplication bug it uncovered
+
+`skill/ScaffoldingEngine.kt` owns pillaring, bridging, obstacle clearance and material
+scavenging, performing at most one world-changing action per call so it stays interruptible by
+an order. Pillaring time-stamps its own jump, so an unrelated fall is never mistaken for a
+pillar opportunity. `judgeClearance` refuses blocks that need a tool the companion lacks,
+which is what stops it mining stone bare-handed for fifteen seconds and looking broken.
+
+Making block placement actually spend materials uncovered a real duplication bug:
+`CompanionPlayerSurrogate` wrote its hand back into `bot.inventory.mainHandItem`, so a stack
+taken from a backpack slot ended up in two slots at once and the companion could place
+scaffolding forever. The surrogate's hand is now scratch space (`IPlayerSurrogate` documents
+the ownership rule), and `mineBlock`/`placeBlock`/`attackEntity` each take the stack they act
+with.
+
+### Progression loop
+
+`skill/ProgressionLoopSkill.kt` runs the ladder WOOD → STONE → CRAFTING → SHELTER → COOKING.
+The decision itself is a pure function of a snapshot
+(`progression/ProgressionState.kt::ProgressionPlanner`), so it is testable without a world.
+`progression/CraftingTableUnlock.kt` enforces the player-first rule as a one-way latch: a
+crafting table in the player's inventory, or one placed within 24 blocks of them, unlocks 3×3
+recipes permanently. Before that the companion waits; it deliberately does not bootstrap its
+own tool chain. `progression/ShelterAssistant.kt` reads the player's own block palette and
+builds in it, skipping any cell the player occupies. `progression/CookingSupport.kt` drives a
+real furnace (load meat, top up fuel, collect output) rather than faking cooked meat.
+
+### Verification performed in this pass
+
+```
+./gradlew build                        -> BUILD SUCCESSFUL (common + fabric + neoforge)
+python3 scripts/check-mixin-targets.py -> 87 mixin classes, 134 targets resolved, 0 findings
+python3 scripts/mc-smoke-test.py       -> RESULT: PASS - reached the main menu
+```
+
+The smoke test boot log contains no mod errors: the only remaining warnings are the
+pre-existing missing-model ones from section 9. **A main-menu pass is a floor, not parity** —
+none of the companion behaviour in this section has been observed in a running world. The
+next honest step is a scripted in-game pass: deploy the companion, issue each order in turn,
+and assert on the resulting entity state, because every failure this pass fixed was a
+behavioural bug that a boot test cannot see.

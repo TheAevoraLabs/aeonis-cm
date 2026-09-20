@@ -23,6 +23,7 @@ object AeonisManagerClient : ClientModInitializer {
 		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("aeonis", "ability_hud"), AeonisAbilityHud)
 		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("aeonis", "ancard_post_processing"), AncardPostProcessing)
 		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("aeonis", "ancard_lightning_events"), AncardLightningEvents)
+		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("aeonis", "companion_speech_overlay"), com.qc.aeonis.client.hud.CompanionSpeechOverlay)
 
 		try {
 			val field = net.minecraft.client.gui.screens.MenuScreens::class.java.getDeclaredField("SCREENS")

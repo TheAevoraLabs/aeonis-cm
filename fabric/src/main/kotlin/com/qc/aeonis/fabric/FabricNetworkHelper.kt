@@ -49,4 +49,8 @@ class FabricNetworkHelper : INetworkHelper {
             provider, model, hasApiKey, temperature, maxTokens, maxBlocksPerMinute, maxEditRadius, griefProtection
         ))
     }
+
+    override fun sendCompanionDialogue(player: ServerPlayer, speakerName: String, message: String, emotion: String) {
+        ServerPlayNetworking.send(player, com.qc.aeonis.network.CompanionDialoguePayload(speakerName, message, emotion))
+    }
 }

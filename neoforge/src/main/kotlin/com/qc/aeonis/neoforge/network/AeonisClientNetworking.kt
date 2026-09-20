@@ -73,7 +73,16 @@ object AeonisClientNetworking {
         isInSoulMode = payload.enabled
     }
 
+    fun onCompanionDialogue(payload: CompanionDialoguePayload) {
+        com.qc.aeonis.companion.ui.CompanionSpeechState.push(
+            payload.speakerName,
+            payload.message,
+            payload.emotion
+        )
+    }
+
     fun onClientTick(mc: Minecraft) {
+        com.qc.aeonis.companion.ui.CompanionSpeechState.tick()
         if (isControlling && mc.player != null && mc.level != null) {
             sendMovementInput(mc)
         }

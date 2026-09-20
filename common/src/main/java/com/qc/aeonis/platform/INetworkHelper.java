@@ -16,4 +16,7 @@ public interface INetworkHelper {
     void sendLlmOpenGui(ServerPlayer player, String provider, String model, boolean hasApiKey, 
                         double temperature, int maxTokens, int maxBlocksPerMinute, 
                         int maxEditRadius, boolean griefProtection);
+
+    // Companion Dialogue HUD
+    void sendCompanionDialogue(ServerPlayer player, String speakerName, String message, String emotion);
 }

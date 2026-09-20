@@ -332,6 +332,14 @@ class VoxelPathPlanner(
         return !fluid.isEmpty && fluid.`is`(FluidTags.LAVA)
     }
 
+    /**
+     * Walks the parent chain back to the start, then hands it to the string puller.
+     *
+     * Order matters: the raw chain is the A* staircase, and pruning has to happen on the
+     * staircase (with the real actions attached) rather than on an already-collapsed list,
+     * because [WaypointStringPuller] uses the intermediate actions to decide what is
+     * prunable. See [WaypointStringPuller] for why the zigzag exists at all.
+     */
     private fun reconstructAndSmoothPath(endNode: Node): List<PathWaypoint> {
         val rawWaypoints = ArrayDeque<PathWaypoint>()
         var curr: Node? = endNode
@@ -341,57 +349,78 @@ class VoxelPathPlanner(
             curr = curr.parent
         }
 
-        if (rawWaypoints.size <= 2) return rawWaypoints.toList()
-
-        // Waypoint smoothing: collapse collinear / line-of-sight waypoints of identical action
-        val smoothed = ArrayList<PathWaypoint>()
-        val list = rawWaypoints.toList()
-        var anchor = 0
-        smoothed.add(list[0])
-
-        var i = 1
-        while (i < list.size) {
-            val p0 = list[anchor].pos
-            val p1 = list[i].pos
-
-            val action = list[i].action
-            // Special actions (parkour, jumping, building, digging) must not be skipped
-            val canSkip = action == MovementAction.WALK && list[anchor].action == MovementAction.WALK
-
-            if (canSkip && canWalkDirectly(p0, p1)) {
-                // Can skip intermediate nodes
-                i++
-            } else {
-                val targetIndex = (i - 1).coerceAtLeast(anchor + 1)
-                smoothed.add(list[targetIndex])
-                anchor = targetIndex
-                i = anchor + 1
-            }
-        }
-
-        if (smoothed.last().pos != list.last().pos) {
-            smoothed.add(list.last())
-        }
-
-        return smoothed
+        return WaypointStringPuller.pull(
+            rawWaypoints.toList(),
+            worldProbe,
+            MAX_SMOOTH_LOOKAHEAD
+        )
     }
 
-    private fun canWalkDirectly(from: BlockPos, to: BlockPos): Boolean {
-        if (from.distManhattan(to) > 8) return false
-        if (from.y != to.y) return false
+    /**
+     * World-backed probe used for string pulling.
+     *
+     * A candidate link is walkable when every cell on the straight line between the two
+     * waypoints has two blocks of clearance, a solid or water floor, no hazard, **and** the
+     * elevation never changes by more than one block per step. That last rule is what makes
+     * this safe to use on slopes: it lets the bot walk a smooth diagonal *up* a staircase,
+     * while still refusing to shortcut a two-block ledge that only a jump can clear.
+     */
+    private val worldProbe = TraversalProbe { from, to -> canTraverse(from, to) }
+
+    /**
+     * Straight-line walkability test between two standable cells.
+     *
+     * Exposed rather than private because the same test answers "is this waypoint worth
+     * keeping?" for callers outside the planner, and duplicating it elsewhere is how the
+     * movement rules drift apart.
+     */
+    fun canTraverse(from: BlockPos, to: BlockPos): Boolean {
+        if (from == to) return true
 
         val dx = to.x - from.x
+        val dy = to.y - from.y
         val dz = to.z - from.z
-        val steps = maxOf(abs(dx), abs(dz))
-        if (steps == 0) return true
+
+        if (maxOf(abs(dx), abs(dz)) > MAX_SMOOTH_LOOKAHEAD) return false
+        if (abs(dy) > MAX_SMOOTH_STEP) return false
+
+        val steps = maxOf(abs(dx), abs(dz), 1)
+        var previousY = from.y
 
         for (step in 1..steps) {
             val t = step.toDouble() / steps
-            val bx = (from.x + dx * t + 0.5).toInt()
-            val bz = (from.z + dz * t + 0.5).toInt()
-            val checkPos = BlockPos(bx, from.y, bz)
-            if (!isStandable(checkPos)) return false
+            val bx = from.x + Math.round(dx * t).toInt()
+            val bz = from.z + Math.round(dz * t).toInt()
+            val idealY = from.y + Math.round(dy * t).toInt()
+
+            // Cell centre sampling: the entity must be able to stand somewhere within one
+            // block of the interpolated height, and that height must be reachable from the
+            // previous sample without climbing.
+            var resolvedY: Int? = null
+            for (offset in 0..1) {
+                val low = idealY - offset
+                if (abs(low - previousY) <= MAX_SMOOTH_STEP && isStandable(BlockPos(bx, low, bz))) {
+                    resolvedY = low
+                    break
+                }
+                val high = idealY + offset
+                if (abs(high - previousY) <= MAX_SMOOTH_STEP && isStandable(BlockPos(bx, high, bz))) {
+                    resolvedY = high
+                    break
+                }
+            }
+
+            val y = resolvedY ?: return false
+            previousY = y
         }
         return true
+    }
+
+    companion object {
+        /** Maximum Chebyshev span for a single smoothed link; mirrors the puller's bound. */
+        const val MAX_SMOOTH_LOOKAHEAD: Int = WaypointStringPuller.MAX_LOOKAHEAD
+
+        /** Maximum elevation change the smoothing test will accept across one sampled step. */
+        const val MAX_SMOOTH_STEP: Int = 1
     }
 }

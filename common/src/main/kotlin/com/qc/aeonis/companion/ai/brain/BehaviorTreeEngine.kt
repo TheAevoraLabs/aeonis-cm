@@ -5,6 +5,9 @@ import com.qc.aeonis.companion.ai.observer.PlayerIntent
 import com.qc.aeonis.companion.ai.perception.StratumOcclusionFilter
 import com.qc.aeonis.companion.command.PingAction
 import com.qc.aeonis.companion.inventory.CompanionInventory
+import com.qc.aeonis.companion.order.CompanionOrder
+import com.qc.aeonis.companion.order.OrderGovernor
+import com.qc.aeonis.companion.order.WeaponSelector
 import com.qc.aeonis.entity.CompanionBotEntity
 import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
@@ -173,6 +176,22 @@ class CompanionBlackboard(val bot: CompanionBotEntity) {
     var depositContainerPos: BlockPos? = null
     var lastPathRecalcTick: Long = 0L
 
+    /**
+     * Block position the current path was planned toward.
+     *
+     * Stored so a replan can be skipped when the destination has not meaningfully moved: an
+     * owner walking in a straight line used to trigger a fresh A* search every second, and the
+     * resulting alternation between plans is a large part of what the zigzag complaint was
+     * actually about.
+     */
+    var lastPathTarget: BlockPos? = null
+
+    /** Governor verdict for this tick, filled by [CompanionBehaviorTree.tick]. */
+    var verdict: OrderGovernor.OrderVerdict? = null
+
+    /** Latched position for a `HOLD` order, so hold means "here", not "wherever I drifted to". */
+    var holdAnchor: BlockPos? = null
+
     val memory = HashMap<String, Any?>()
 
     fun clearPing() {
@@ -183,6 +202,7 @@ class CompanionBlackboard(val bot: CompanionBotEntity) {
     fun clearPath() {
         currentPath = null
         currentPathIndex = 0
+        lastPathTarget = null
     }
 
     fun setPath(waypoints: List<PathWaypoint>) {
@@ -195,6 +215,26 @@ class CompanionBlackboard(val bot: CompanionBotEntity) {
 // ------------------------------------------------------------------ Behavior Tree Engine
 
 class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
+
+    companion object {
+        /** Navigation speed used when answering a bodyguard trigger. */
+        const val BODYGUARD_SPRINT_SPEED = 1.5
+
+        /** Squared follow distance at which the companion stops closing on the owner. */
+        const val FOLLOW_STOP_DISTANCE_SQR = 12.25
+
+        /**
+         * Minimum ticks between A* replans toward the same destination.
+         *
+         * Thirty ticks (1.5s) is long enough that a straight, string-pulled path survives the
+         * whole traverse, and short enough that a player who turns a corner is followed within a
+         * blink. Replanning every tick was a second, quieter source of visible zigzag.
+         */
+        const val PATH_RECALC_INTERVAL_TICKS = 30L
+
+        /** Distance a destination may drift before the existing path is considered invalid. */
+        const val PATH_TARGET_TOLERANCE = 2.0
+    }
 
     val blackboard = CompanionBlackboard(bot)
     var pathPlanner: VoxelPathPlanner? = null
@@ -214,30 +254,180 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
         return current
     }
 
+    /**
+     * Root selector. Order is the whole design.
+     *
+     * | # | subtree | why here |
+     * | :--- | :--- | :--- |
+     * | 1 | bodyguard | the owner is in danger; nothing else matters |
+     * | 2 | emergency | the companion itself is about to die |
+     * | 3 | Rhistel ping | an explicit, momentary instruction outranks a standing order |
+     * | 4 | order enforcement | `HOLD`/`FOLLOW`/`RETREAT` beat autonomy |
+     * | 5 | skills | autonomy, already gated by the same governor |
+     * | 6 | combat | target selection with stratum occlusion |
+     * | 7 | intent synergy | opportunistic torches and drop vacuuming |
+     * | 8 | follow owner | default movement |
+     * | 9 | idle | look at the owner and stand by |
+     *
+     * Bodyguard above emergency is intentional: if the owner is being attacked, a companion that
+     * flees because its own health is low has failed at the only job it has.
+     */
     private fun buildBrainTree(): BTNode {
         return SelectorNode(
             listOf(
-                // Priority 1: Emergency & Panic Response (Swelling Creeper / Low Health)
+                buildBodyguardSubtree(),
                 buildEmergencySubtree(),
-
-                // Priority 2: Rhistel Whistle Ping Override
                 buildRhistelPingSubtree(),
-
-                // Priority 3: Autonomous Skills (Hunting & Feeding, Vacuum Scavenger, Crafting, Building)
+                buildOrderEnforcementSubtree(),
                 buildSkillsSubtree(),
-
-                // Priority 4: Tactical Combat Support with Stratum Occlusion
                 buildCombatSubtree(),
-
-                // Priority 5: Player Intent Synergy (Mining Support, Torch Placement)
                 buildIntentSynergySubtree(),
-
-                // Priority 6: Follow Owner with Dynamic Parkour
                 buildFollowOwnerSubtree(),
-
-                // Priority 7: Idle Standby & Guard
                 buildIdleSubtree()
             )
+        )
+    }
+
+    /** Cached governor verdict for this tick, evaluating on demand if the tick has not filled it. */
+    private fun verdictOf(bb: CompanionBlackboard): OrderGovernor.OrderVerdict =
+        bb.verdict ?: OrderGovernor.evaluate(bb.bot).also { bb.verdict = it }
+
+    /**
+     * Emergency bodyguard response.
+     *
+     * Fires while the governor's bodyguard latch is live — i.e. the owner was attacked recently
+     * or is on low health. It aborts every skill and path in flight, arms the companion with its
+     * best melee weapon, and either engages the attacker or sprints to the owner.
+     *
+     * Aborting in-flight work here rather than relying on the skill manager is deliberate: the
+     * owner can be attacked on a tick where the active skill is mid-swing with a live target, and
+     * that target has to be released before the companion can answer the real threat.
+     */
+    private fun buildBodyguardSubtree(): BTNode {
+        return SequenceNode(
+            listOf(
+                ConditionNode("IsBodyguardLatchLive") { bb -> verdictOf(bb).isBodyguard },
+                ActionNode("DefendOwner") { bb ->
+                    val botEntity = bb.bot
+                    val verdict = verdictOf(bb)
+                    val serverLevel = getLevel() ?: return@ActionNode BTStatus.FAILURE
+
+                    bb.bot.skillManager.stopActiveSkill("bodyguard: ${verdict.reason}")
+                    bb.clearPath()
+
+                    // Highest-DPS melee weapon, never fists. If there is none, the companion
+                    // still advances and uses its natural attack damage.
+                    WeaponSelector.equipBestMeleeWeapon(botEntity)
+
+                    val hostile = OrderGovernor.selectBodyguardTarget(botEntity, verdict)
+                        ?: OrderGovernor.nearestHostileToBot(botEntity, 12.0)
+
+                    if (hostile != null && hostile.isAlive) {
+                        botEntity.lookControl.setLookAt(hostile, 30.0f, 30.0f)
+                        if (botEntity.distanceToSqr(hostile) <= 9.0) {
+                            val weapon = botEntity.inventory.mainHandItem
+                            val surrogate = botEntity.getOrCreateSurrogate()
+                            val hit = surrogate?.attackEntity(hostile, weapon)
+                                ?: botEntity.doHurtTarget(serverLevel, hostile)
+                            if (hit) {
+                                botEntity.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true)
+                            }
+                            return@ActionNode BTStatus.RUNNING
+                        }
+                        pursue(botEntity, hostile.blockPosition(), BODYGUARD_SPRINT_SPEED)
+                        return@ActionNode BTStatus.RUNNING
+                    }
+
+                    // No threat left standing: get to the owner and stay there.
+                    val owner = botEntity.getOwnerPlayer() ?: return@ActionNode BTStatus.FAILURE
+                    if (botEntity.distanceToSqr(owner) > 12.25) {
+                        pursue(botEntity, owner.blockPosition(), BODYGUARD_SPRINT_SPEED)
+                        return@ActionNode BTStatus.RUNNING
+                    }
+                    BTStatus.SUCCESS
+                }
+            )
+        )
+    }
+
+    /**
+     * Standing-order enforcement.
+     *
+     * Runs only when the governor says an order is preempting autonomy, which is exactly the set
+     * `HOLD`, `FOLLOW` and `RETREAT`. Each branch stops skills and navigation first, because the
+     * point of an order is to *end* what was happening, not to queue behind it.
+     */
+    private fun buildOrderEnforcementSubtree(): BTNode {
+        return SequenceNode(
+            listOf(
+                ConditionNode("HasPreemptingOrder") { bb ->
+                    verdictOf(bb).mode == OrderGovernor.AgentMode.ORDER_ENFORCED
+                },
+                ActionNode("EnforceStandingOrder") { bb ->
+                    val botEntity = bb.bot
+                    val verdict = verdictOf(bb)
+                    val owner = botEntity.getOwnerPlayer()
+
+                    when (verdict.order) {
+                        CompanionOrder.HOLD -> {
+                            bb.bot.skillManager.stopActiveSkill("order HOLD")
+                            val anchor = bb.holdAnchor ?: botEntity.blockPosition().also { bb.holdAnchor = it }
+                            if (botEntity.blockPosition().distSqr(anchor) > 4.0) {
+                                bb.clearPath()
+                                pursue(botEntity, anchor, 1.2)
+                            } else {
+                                bb.clearPath()
+                                botEntity.navigation.stop()
+                                owner?.let { botEntity.lookControl.setLookAt(it, 10.0f, 10.0f) }
+                            }
+                            BTStatus.RUNNING
+                        }
+
+                        CompanionOrder.RETREAT -> {
+                            bb.bot.skillManager.stopActiveSkill("order RETREAT")
+                            val threat = OrderGovernor.nearestHostileToBot(botEntity, 16.0)
+                            val origin = threat?.position() ?: owner?.position() ?: botEntity.position()
+                            val away = botEntity.position().subtract(origin)
+                            val escape = if (away.lengthSqr() < 1.0e-4) Vec3(1.0, 0.0, 0.0) else away.normalize()
+                            val destination = botEntity.blockPosition().offset(
+                                (escape.x * 8).toInt(), 0, (escape.z * 8).toInt()
+                            )
+                            bb.clearPath()
+                            pursue(botEntity, destination, 1.45)
+                            BTStatus.RUNNING
+                        }
+
+                        CompanionOrder.FOLLOW -> {
+                            if (owner == null) return@ActionNode BTStatus.FAILURE
+                            bb.bot.skillManager.stopActiveSkill("order FOLLOW")
+                            if (botEntity.distanceToSqr(owner) <= FOLLOW_STOP_DISTANCE_SQR) {
+                                bb.clearPath()
+                                BTStatus.SUCCESS
+                            } else {
+                                navigateTowards(bb, owner.blockPosition())
+                                BTStatus.RUNNING
+                            }
+                        }
+
+                        // ATTACK/GUARD/HUNT/FREE/FREE do not set preemptsAutonomy, so reaching
+                        // here means the order changed mid-tick; decline and re-evaluate.
+                        else -> BTStatus.FAILURE
+                    }
+                }
+            )
+        )
+    }
+
+    /**
+     * Direct steering for short, urgent moves where a full A* plan would cost more than it
+     * saves. Used by bodyguard and order enforcement only.
+     */
+    private fun pursue(botEntity: CompanionBotEntity, destination: BlockPos, speed: Double) {
+        botEntity.navigation.moveTo(
+            destination.x + 0.5,
+            destination.y.toDouble(),
+            destination.z + 0.5,
+            speed
         )
     }
 
@@ -411,8 +601,13 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
                     botEntity.lookControl.setLookAt(target, 30.0f, 30.0f)
 
                     if (distSqr <= 9.0) { // Melee range <= 3.0 blocks
+                        // Fight with the best weapon available, never with fists if a weapon is
+                        // in the bag — combat and hunting share the same arming rule.
+                        WeaponSelector.equipBestMeleeWeapon(botEntity)
+                        val weapon = botEntity.inventory.mainHandItem
                         val surrogate = botEntity.getOrCreateSurrogate()
-                        val hit = surrogate?.attackEntity(target) ?: botEntity.doHurtTarget(serverLevel, target)
+                        val hit = surrogate?.attackEntity(target, weapon)
+                            ?: botEntity.doHurtTarget(serverLevel, target)
                         if (hit) {
                             botEntity.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true)
                         }
@@ -533,17 +728,39 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
 
     // ------------------------------------------------------------------ Movement & Navigation
 
+    /**
+     * Ensures the blackboard holds a fresh path toward [targetPos].
+     *
+     * A replan happens only when the previous path is exhausted, when the destination has moved
+     * more than [PATH_TARGET_TOLERANCE] blocks, and at most every [PATH_RECALC_INTERVAL_TICKS]
+     * ticks. All three conditions are needed: without the destination check the companion
+     * replans on a timer while walking straight, and each new A* search can pick a different
+     * equally-optimal staircase, which the entity then visibly follows.
+     */
     private fun navigateTowards(bb: CompanionBlackboard, targetPos: BlockPos) {
         val botEntity = bb.bot
         val serverLevel = getLevel() ?: return
         val now = botEntity.level().gameTime
         val planner = getPlanner(serverLevel)
 
-        // Recalculate path every 20 ticks or when path is missing
-        if (bb.currentPath == null || bb.currentPathIndex >= bb.currentPath!!.size || (now - bb.lastPathRecalcTick > 20)) {
+        val path = bb.currentPath
+        val pathExhausted = path == null || bb.currentPathIndex >= path.size
+        val targetMoved = bb.lastPathTarget?.let { !it.closerThan(targetPos, PATH_TARGET_TOLERANCE) } ?: true
+        val recalcDue = now - bb.lastPathRecalcTick >= PATH_RECALC_INTERVAL_TICKS
+
+        if (pathExhausted || (targetMoved && recalcDue)) {
             val planned = planner.planPath(botEntity.blockPosition(), targetPos)
             if (planned != null && planned.isNotEmpty()) {
                 bb.setPath(planned)
+                bb.lastPathTarget = targetPos
+            } else if (pathExhausted) {
+                // Genuinely unreachable: clear so callers stop driving toward a dead path, and
+                // fall back to the vanilla navigator, which can still round simple corners the
+                // voxel planner declined to model.
+                bb.clearPath()
+                botEntity.navigation.moveTo(
+                    targetPos.x + 0.5, targetPos.y.toDouble(), targetPos.z + 0.5, 1.2
+                )
             }
         }
     }
@@ -555,10 +772,25 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
         // 1. Refresh observer blackboard state
         blackboard.currentIntent = bot.getPlayerIntent()
 
-        // 2. Execute Behavior Tree
+        // 2. Evaluate the governor once and share the verdict with every subtree, so all of them
+        //    act on the same decision within a tick rather than each re-deriving it.
+        val verdict = OrderGovernor.evaluate(bot)
+        blackboard.verdict = verdict
+
+        // 3. Keep the HOLD anchor pinned to the order that latched it: a new order releases the
+        //    old anchor, and re-issuing HOLD later latches a fresh one.
+        if (verdict.order != CompanionOrder.HOLD) {
+            blackboard.holdAnchor = null
+        }
+
+        // 4. Execute the behaviour tree.
         root.tick(blackboard)
 
-        // 3. Drive physical micro-locomotion along current path
+        // 5. Drive physical micro-locomotion along the current path. Movement is suppressed while
+        //    a HOLD is being enforced, so a stale path cannot walk the companion off its post.
+        if (verdict.mode == OrderGovernor.AgentMode.ORDER_ENFORCED && verdict.order == CompanionOrder.HOLD) {
+            return
+        }
         driveMovement()
     }
 
@@ -582,27 +814,44 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
             return
         }
 
-        // Handle waypoint action primitives
+        // Waypoint action primitives are delegated to the scaffolding engine, which owns tool
+        // selection, material consumption and the refusal reasons. The engine returns RUNNING
+        // while a multi-tick action is still in progress; the waypoint is only considered reached
+        // once the entity is physically at it, so no progress tracking is needed here.
+        val engine = bot.scaffoldingEngine
         when (currentWaypoint.action) {
             MovementAction.DIG_THROUGH -> {
-                bot.tryBreakBlock(targetPos)
+                engine.clearObstacle(targetPos)
             }
             MovementAction.BRIDGE_FORWARD -> {
-                bot.tryPlaceBlock(targetPos.below(), Direction.UP)
+                engine.bridgeForward(directionToward(bot, targetPos))
             }
             MovementAction.PILLAR_UP -> {
-                bot.tryPlaceBlock(bot.blockPosition().below(), Direction.UP)
-                bot.jumpControl.jump()
+                engine.pillarUp()
             }
             MovementAction.SPRINT_JUMP, MovementAction.PARKOUR_GAP -> {
                 bot.isSprinting = true
                 if (bot.onGround() && distHorizontal < 2.5) {
-                    bot.jumpControl.jump()
+                    bot.jumpFromGround()
                 }
             }
             MovementAction.WALK, MovementAction.FALL_SAFE -> {
-                // Standard walking
+                // Standard walking; nothing to prepare.
             }
+        }
+
+        // Water is its own motion regime. Buoyancy and the swim stroke are applied here and the
+        // method returns, because the walking pipeline below would fight them: it drives the
+        // entity downward toward `targetCenter.y` and can only jump on the ground, which is
+        // exactly how the companion used to sink.
+        if (bot.isInWater) {
+            val heading = Vec3(relative.x, 0.0, relative.z)
+            AquaticLocomotion.stroke(bot, heading, currentWaypoint.targetSpeed > 1.2)
+            bot.moveControl.setWantedPosition(
+                targetCenter.x, bot.y, targetCenter.z,
+                currentWaypoint.targetSpeed * 0.5
+            )
+            return
         }
 
         // Neural policy or kinematic heuristic inference
@@ -622,10 +871,26 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
             currentWaypoint.targetSpeed * (if (motorAction.sprint) 1.25 else 1.0)
         )
         if (motorAction.jump && bot.onGround()) {
-            bot.jumpControl.jump()
+            bot.jumpFromGround()
         }
         if (motorAction.sprint) {
             bot.isSprinting = true
+        }
+    }
+
+    /**
+     * Cardinal direction from the companion toward [target], preferring the dominant axis so a
+     * diagonal destination still yields a legal (non-vertical) bridging direction.
+     */
+    private fun directionToward(botEntity: CompanionBotEntity, target: BlockPos): Direction {
+        val current = botEntity.blockPosition()
+        val dx = target.x - current.x
+        val dz = target.z - current.z
+        if (dx == 0 && dz == 0) return Direction.fromYRot(botEntity.yRot.toDouble())
+        return if (kotlin.math.abs(dx) >= kotlin.math.abs(dz)) {
+            if (dx >= 0) Direction.EAST else Direction.WEST
+        } else {
+            if (dz >= 0) Direction.SOUTH else Direction.NORTH
         }
     }
 
