@@ -164,6 +164,17 @@ class ConditionNode(val name: String, val predicate: (CompanionBlackboard) -> Bo
 
 // ------------------------------------------------------------------ Blackboard
 
+enum class MovementOwner {
+    /** Nobody is driving; the companion stands still. */
+    NONE,
+
+    /** A skill owns locomotion, via vanilla `PathNavigation`. */
+    SKILL,
+
+    /** The behaviour tree owns locomotion, via the voxel planner and the motor controller. */
+    TREE
+}
+
 class CompanionBlackboard(val bot: CompanionBotEntity) {
     var currentTarget: LivingEntity? = null
     var targetPingPos: BlockPos? = null
@@ -175,6 +186,21 @@ class CompanionBlackboard(val bot: CompanionBotEntity) {
     var miningTargetPos: BlockPos? = null
     var depositContainerPos: BlockPos? = null
     var lastPathRecalcTick: Long = 0L
+
+    /**
+     * Who is walking the companion right now.
+     *
+     * This exists because two subsystems used to drive locomotion at the same time: the skills
+     * call `navigation.moveTo` for their own errands, while the tree's `driveMovement` steers
+     * `moveControl` along whatever path was last planned. When a skill took the tick, the stale
+     * path from the *previous* branch was still live, so the companion walked one way for the
+     * skill and the other way for the tree, then swapped back — which is exactly the reported
+     * "it does something with no reason, then comes back and goes again".
+     *
+     * Only one owner may drive per tick, and the owner changes only through [claimForSkill] or
+     * [setPath], so the conflict cannot reappear by accident.
+     */
+    var movementOwner: MovementOwner = MovementOwner.NONE
 
     /**
      * Block position the current path was planned toward.
@@ -203,12 +229,36 @@ class CompanionBlackboard(val bot: CompanionBotEntity) {
         currentPath = null
         currentPathIndex = 0
         lastPathTarget = null
+        if (movementOwner == MovementOwner.TREE) movementOwner = MovementOwner.NONE
+    }
+
+    /**
+     * Hands locomotion to a skill, discarding any tree-planned path.
+     *
+     * Anything that thinks it is walking toward a planned waypoint must be told to stop first, or
+     * it will keep driving `moveControl` toward a stale destination.
+     */
+    fun claimForSkill() {
+        currentPath = null
+        currentPathIndex = 0
+        lastPathTarget = null
+        movementOwner = MovementOwner.SKILL
+    }
+
+    /** Releases locomotion, used when the owning skill stops. */
+    fun releaseMovement() {
+        movementOwner = MovementOwner.NONE
     }
 
     fun setPath(waypoints: List<PathWaypoint>) {
         currentPath = waypoints
         currentPathIndex = 0
         lastPathRecalcTick = bot.level().gameTime
+        if (movementOwner != MovementOwner.TREE) {
+            // Hand over cleanly: stop the vanilla navigator that a skill may have been driving.
+            bot.navigation.stop()
+            movementOwner = MovementOwner.TREE
+        }
     }
 }
 
@@ -431,13 +481,30 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
         )
     }
 
+    /**
+     * Runs the autonomous skill layer, and hands locomotion over to it for the duration.
+     *
+     * A skill that is doing something walks the companion itself through `PathNavigation`, so the
+     * tree's path is dropped and `driveMovement` is disabled while the skill holds the tick. See
+     * [MovementOwner] for why that hand-off has to be explicit.
+     */
     private fun buildSkillsSubtree(): BTNode {
         return ActionNode("ExecuteAutonomousSkills") { bb ->
             val result = bb.bot.skillManager.tick()
             when (result.status) {
-                com.qc.aeonis.companion.skill.SkillStatus.SUCCESS -> BTStatus.SUCCESS
-                com.qc.aeonis.companion.skill.SkillStatus.RUNNING -> BTStatus.RUNNING
-                else -> BTStatus.FAILURE
+                com.qc.aeonis.companion.skill.SkillStatus.SUCCESS,
+                com.qc.aeonis.companion.skill.SkillStatus.RUNNING -> {
+                    bb.claimForSkill()
+                    if (result.status == com.qc.aeonis.companion.skill.SkillStatus.RUNNING) {
+                        BTStatus.RUNNING
+                    } else {
+                        BTStatus.SUCCESS
+                    }
+                }
+                else -> {
+                    bb.releaseMovement()
+                    BTStatus.FAILURE
+                }
             }
         }
     }
@@ -795,6 +862,8 @@ class CompanionBehaviorTree(val bot: CompanionBotEntity) : AutoCloseable {
     }
 
     private fun driveMovement() {
+        // Only the current owner may steer. See [MovementOwner].
+        if (blackboard.movementOwner != MovementOwner.TREE) return
         val path = blackboard.currentPath ?: return
         val idx = blackboard.currentPathIndex
         if (idx >= path.size) {

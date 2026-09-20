@@ -1,5 +1,6 @@
 package com.qc.aeonis.companion.skill
 
+import com.qc.aeonis.companion.ai.perception.StratumOcclusionFilter
 import com.qc.aeonis.companion.inventory.CompanionInventory
 import com.qc.aeonis.companion.order.OrderGovernor
 import com.qc.aeonis.companion.order.WeaponSelector
@@ -12,11 +13,9 @@ import net.minecraft.server.level.ServerPlayer
 import net.minecraft.sounds.SoundEvents
 import net.minecraft.sounds.SoundSource
 import net.minecraft.world.InteractionHand
+import net.minecraft.world.entity.Leashable
+import net.minecraft.world.entity.TamableAnimal
 import net.minecraft.world.entity.animal.Animal
-import net.minecraft.world.entity.animal.chicken.Chicken
-import net.minecraft.world.entity.animal.cow.Cow
-import net.minecraft.world.entity.animal.pig.Pig
-import net.minecraft.world.entity.animal.sheep.Sheep
 import net.minecraft.world.entity.item.ItemEntity
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.component.SwingAnimation
@@ -89,6 +88,50 @@ class HuntingFeedingSkill : CompanionSkill {
     /** Ticks between melee swings while hunting. */
     private val attackIntervalTicks = 15
 
+    /**
+     * Urgency added while the owner is starving. Sized above the skill manager's commitment
+     * bonus, because feeding a starving player outranks finishing an errand.
+     */
+    private val starvingUrgency = 60
+
+    /** Urgency added when the owner is hungry and the companion is already carrying food. */
+    private val hungryUrgency = 35
+
+    /** Food level at or below which the owner counts as starving. */
+    private val starvingFoodLevel = 6
+
+    /**
+     * Maximum distance the companion may drift from the owner while hunting.
+     *
+     * A hunter that chases an animal out of sight is indistinguishable from a bug; the leash keeps
+     * every hunt inside the player's view and stops the companion arriving back mid-fight.
+     */
+    private val ownerLeashDistance = 20.0
+
+    /** How far from the owner an animal may be for it to be worth hunting. */
+    private val ownerAnchoredHuntRadius = 20.0
+
+    /** Ticks to pause after a kill, so a hunt reads as deliberate rather than frantic. */
+    private val betweenKillsPause = 40
+
+    private var huntCooldown: Int = 0
+
+    /**
+     * Escalates when the owner actually needs food.
+     *
+     * See [CompanionSkill.urgency]: this is the only mechanism that lets the feeding skill beat an
+     * errand the companion has already committed to, and it only fires when the need is real.
+     */
+    override fun urgency(bot: CompanionBotEntity): Int {
+        val owner = bot.getOwnerPlayer() ?: return 0
+        val foodLevel = owner.foodData.foodLevel
+        return when {
+            foodLevel <= starvingFoodLevel -> starvingUrgency
+            foodLevel < hungerFeedingThreshold && FoodLedger.hasAnyFood(bot.inventory) -> hungryUrgency
+            else -> 0
+        }
+    }
+
     override fun canActivate(bot: CompanionBotEntity): Boolean {
         val owner = bot.getOwnerPlayer() ?: return false
 
@@ -105,10 +148,14 @@ class HuntingFeedingSkill : CompanionSkill {
         // Hunting requires an actual need, a spent-free quota and a real weapon.
         if (!hungry && hasFood) return false
         if (ledger.quotaSpent) return false
+        if (huntCooldown > 0) return false
         if (!WeaponSelector.hasMeleeWeapon(bot)) return false
         if (FoodLedger.hasAnyFood(bot.inventory) && !hungry) return false
 
-        return findNearbyHuntableAnimal(bot) != null
+        // Stay leashed to the owner: if it has drifted away, regrouping is the job, not hunting.
+        if (bot.distanceToSqr(owner) > ownerLeashDistance * ownerLeashDistance) return true
+
+        return findNearbyHuntableAnimal(bot, owner) != null
     }
 
     override fun tick(bot: CompanionBotEntity): SkillResult {
@@ -116,11 +163,21 @@ class HuntingFeedingSkill : CompanionSkill {
         val owner = bot.getOwnerPlayer() ?: return SkillResult.FAILURE
 
         if (attackCooldown > 0) attackCooldown--
+        if (huntCooldown > 0) huntCooldown--
 
         // Orders can arrive mid-hunt; abort rather than finish the swing.
         if (OrderGovernor.evaluate(bot).preemptSkills) {
             stop(bot)
             return SkillResult(SkillStatus.IDLE, "Hunt aborted: order override", cooldownTicks = 0)
+        }
+
+        // Leash first: never let a hunt pull the companion away from the player. Serving a hungry
+        // owner takes priority over the walk back, so a companion already carrying food hands it
+        // over on arrival rather than walking past them.
+        if (bot.distanceToSqr(owner) > ownerLeashDistance * ownerLeashDistance) {
+            stop(bot)
+            bot.navigation.moveTo(owner, 1.3)
+            return SkillResult(SkillStatus.RUNNING, "Regrouping with the owner", cooldownTicks = 0)
         }
 
         // Step 1: deliver food to a hungry owner (any food, cooked or not).
@@ -157,9 +214,26 @@ class HuntingFeedingSkill : CompanionSkill {
             )
         }
 
+        // Step 4: a short beat between animals. Without it the companion snaps from one carcass to
+        // the next on the same tick, which reads as erratic even though each individual choice is
+        // sound.
+        if (huntCooldown > 0) {
+            return SkillResult(
+                SkillStatus.RUNNING,
+                "Pacing before the next animal (${huntCooldown}t)",
+                cooldownTicks = 0
+            )
+        }
+
+        // The current target is kept until it is dead or genuinely no longer worth chasing. This
+        // commitment is what stops the companion oscillating between two animals mid-pursuit.
         var animal = targetAnimal
-        if (animal == null || !animal.isAlive) {
-            animal = findNearbyHuntableAnimal(bot)
+        if (animal != null && !isStillHuntable(animal, owner)) {
+            targetAnimal = null
+            animal = null
+        }
+        if (animal == null) {
+            animal = findNearbyHuntableAnimal(bot, owner)
             targetAnimal = animal
             if (animal != null) {
                 announce(bot, owner, "Hunting a ${animal.type.description.string}.")
@@ -187,8 +261,9 @@ class HuntingFeedingSkill : CompanionSkill {
                     attackCooldown = attackIntervalTicks
                     if (!animal.isAlive) {
                         ledger.recordKill()
-                        targetAnimal = null
                         ledger.recordMeat(FoodLedger.rawMeatEquivalent(animal))
+                        targetAnimal = null
+                        huntCooldown = betweenKillsPause
                     }
                 }
                 return SkillResult(
@@ -253,31 +328,60 @@ class HuntingFeedingSkill : CompanionSkill {
     }
 
     /**
-     * Nearest huntable animal, weighted toward the species the companion is best at taking.
+     * Best animal to hunt right now, or null.
      *
-     * Babies and animals the companion cannot reach in a straight line are excluded: a hunt
-     * that keeps failing to path wastes the whole quota window.
+     * Selection is anchored on the **owner**, not the companion: an animal 30 blocks behind the
+     * player is not a target, however close it is to the bot. Candidates must also be
+     * tactically reachable through `StratumOcclusionFilter`, which is the same test combat uses,
+     * so the companion never picks prey it cannot actually path to through a wall, a ravine or a
+     * sealed cave. Babies and invulnerable animals are excluded outright.
+     *
+     * Scoring is meat-yield per distance rather than species-then-distance: a cow yields two meat
+     * and a chicken one, so a cow slightly further away is the better hunt, which is what a player
+     * would decide.
      */
-    private fun findNearbyHuntableAnimal(bot: CompanionBotEntity): Animal? {
+    private fun findNearbyHuntableAnimal(bot: CompanionBotEntity, owner: ServerPlayer): Animal? {
         val serverLevel = bot.level() as? ServerLevel ?: return null
-        val animals = serverLevel.getEntitiesOfClass(Animal::class.java, bot.boundingBox.inflate(20.0)) { animal ->
-            animal.isAlive && !animal.isBaby && !animal.isInvulnerable
-        }
+        val animals = serverLevel.getEntitiesOfClass(
+            Animal::class.java, owner.boundingBox.inflate(ownerAnchoredHuntRadius)
+        ) { animal -> isHuntable(animal) }
 
-        return animals.minByOrNull { animal ->
-            val speciesPriority = when (animal) {
-                is Sheep -> 0
-                is Cow -> 1
-                is Pig -> 2
-                is Chicken -> 3
-                else -> 4
+        return animals
+            .filter { StratumOcclusionFilter.isTacticallyReachable(bot, it) }
+            .minByOrNull { animal ->
+                val yield = FoodLedger.rawMeatEquivalent(animal).coerceAtLeast(1)
+                val distanceFromOwner = kotlin.math.sqrt(animal.distanceToSqr(owner))
+                distanceFromOwner / yield
             }
-            speciesPriority * 100.0 + bot.distanceToSqr(animal)
-        }
+    }
+
+    /**
+     * True while [animal] is still worth chasing: alive, not a baby, and still on the companion's
+     * side of the owner's leash. Deliberately cheap — it runs every tick for the committed target.
+     */
+    private fun isStillHuntable(animal: Animal, owner: ServerPlayer): Boolean {
+        if (!isHuntable(animal)) return false
+        return animal.distanceToSqr(owner) <= ownerAnchoredHuntRadius * ownerAnchoredHuntRadius * 1.5
+    }
+
+    /**
+     * True when the animal is legitimate prey.
+     *
+     * The tamed and leashed exclusions are the fix for the reported "it hunts random things":
+     * `Wolf`, `Cat` and `Horse` are all `Animal`s, so the companion used to happily attack the
+     * player's own pets and any animal they were leading home. Pets are off the menu by identity
+     * (tamed), not by species, so a player's tamed wolf is safe while a wild one is still fair game.
+     */
+    private fun isHuntable(animal: Animal): Boolean {
+        if (!animal.isAlive || animal.isBaby || animal.isInvulnerable) return false
+        if (animal is TamableAnimal && animal.isTame) return false
+        if (animal is Leashable && animal.isLeashed) return false
+        return true
     }
 
     override fun stop(bot: CompanionBotEntity) {
         targetAnimal = null
+        huntCooldown = 0
         bot.navigation.stop()
     }
 }

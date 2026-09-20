@@ -49,7 +49,7 @@
     "client.MinecraftPickMixin",
     "client.MobRenderMixin",
     "client.MultiPlayerGameModeMixin",
-    "client.OptionsScreenMixin",
+    "client.PauseScreenMixin",
     "client.PlayerCameraPosMixin",
     "client.PlayerRendererMixin",
     "client.WindowTitleMixin"

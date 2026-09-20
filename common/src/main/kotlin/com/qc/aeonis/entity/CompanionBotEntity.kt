@@ -96,11 +96,16 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
 
     /** Ticks between ordinary block placements (torches, scaffolds). */
     private val blockPlaceCooldownTicks = 15
-    private var currentBreakingPos: BlockPos? = null
-    private var breakProgress = 0f
-
-    /** Live reference to the stack chosen for the in-progress break; null when idle. */
-    private var breakingTool: ItemStack? = null
+    /**
+     * The single block-breaking session for this entity.
+     *
+     * Breaking state lives here rather than on the entity because progress is per-block and
+     * vanilla-timed: see [com.qc.aeonis.companion.skill.MiningSession] for why the old
+     * four-ticks-per-block accumulator was replaced.
+     */
+    val miningSession: com.qc.aeonis.companion.skill.MiningSession by lazy {
+        com.qc.aeonis.companion.skill.MiningSession(this)
+    }
     
     // True 33-slot Inventory & Player Surrogate Trampoline
     val inventory = CompanionInventory()
@@ -446,39 +451,29 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
     }
 
     /**
-     * Progressive block breaking, four ticks per block by default.
+     * Advances a real block break at [pos] by one tick, returning true only on the tick the
+     * block actually comes apart.
      *
-     * The tool is chosen once when the target changes and is passed explicitly to the
-     * surrogate for the whole break, so durability lands on the tool that did the work
-     * instead of on whatever happened to be in the main hand.
+     * Call it every tick for the same position; progress, the tool choice and the timing all come
+     * from [miningSession], which reproduces vanilla's hardness/tool maths. Callers that want the
+     * reason a break was declined should use [miningSession] directly.
      */
     fun tryBreakBlock(pos: BlockPos): Boolean {
-        if (blockBreakCooldown > 0 && currentBreakingPos != pos) return false
-        val serverLevel = level() as? ServerLevel ?: return false
-        val state = serverLevel.getBlockState(pos)
-        if (state.isAir || state.getDestroySpeed(serverLevel, pos) < 0) return false
-
-        if (currentBreakingPos != pos) {
-            currentBreakingPos = pos
-            breakProgress = 0f
-            breakingTool = inventory.findBestTool(state)
+        if (blockBreakCooldown > 0 && !miningSession.isTargeting(pos)) return false
+        val result = miningSession.advance(pos)
+        if (result.isBroken) {
+            blockBreakCooldown = com.qc.aeonis.companion.skill.MiningSession.COOLDOWN_AFTER_BREAK
+            return true
         }
-
-        breakProgress += 0.25f
-
-        if (breakProgress >= 1.0f) {
-            val tool = breakingTool ?: inventory.findBestTool(state)
-            val playerSurrogate = getOrCreateSurrogate()
-            val success = playerSurrogate?.mineBlock(pos, tool)
-                ?: serverLevel.destroyBlock(pos, true, this)
-            currentBreakingPos = null
-            breakingTool = null
-            breakProgress = 0f
-            blockBreakCooldown = 10
-            return success
-        }
-
         return false
+    }
+
+    /** Ticks the current dig would still need; useful for deciding whether a job is worth starting. */
+    fun ticksToBreak(pos: BlockPos): Int {
+        val serverLevel = level() as? ServerLevel ?: return Int.MAX_VALUE
+        val state = serverLevel.getBlockState(pos)
+        if (state.isAir) return 0
+        return miningSession.estimateTicks(state, pos)
     }
 
     fun hasIncomingProjectiles(): Boolean {

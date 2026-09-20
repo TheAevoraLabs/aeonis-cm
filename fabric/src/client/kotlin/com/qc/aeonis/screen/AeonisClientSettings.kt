@@ -22,7 +22,13 @@ import java.nio.file.Path
 object AeonisClientSettings {
 
     private val gson = GsonBuilder().setPrettyPrinting().create()
-    private val path: Path = FabricLoader.getInstance().configDir.resolve("aeonis-client.json")
+    private val path: Path by lazy {
+        try {
+            FabricLoader.getInstance().configDir.resolve("aeonis-client.json")
+        } catch (_: Throwable) {
+            Path.of("config", "aeonis-client.json")
+        }
+    }
 
     /** Show the ability bar (form name, ability keys, cooldowns) while controlling a mob. */
     var showAbilityHud: Boolean = true
@@ -48,6 +54,12 @@ object AeonisClientSettings {
     /** Show the camouflage level and movement style in the ability bar header. */
     var showFormDetails: Boolean = true
 
+    /** Show floating companion dialogue card HUD overlay. */
+    var companionSpeechOverlay: Boolean = true
+
+    /** Play typewriter clicking sound as companion dialogue reveals. */
+    var companionSound: Boolean = true
+
     private var loaded = false
 
     fun load() {
@@ -63,6 +75,8 @@ object AeonisClientSettings {
             largeFormCamera = root.readBoolean("large_form_camera", largeFormCamera)
             camouflageLevel = CamouflageLevel.byId(root.readString("camouflage_level", camouflageLevel.id))
             showFormDetails = root.readBoolean("show_form_details", showFormDetails)
+            companionSpeechOverlay = root.readBoolean("companion_speech_overlay", companionSpeechOverlay)
+            companionSound = root.readBoolean("companion_sound", companionSound)
         } catch (_: Exception) {
             // A corrupt file must never stop the client from starting; defaults win.
         }
@@ -70,7 +84,8 @@ object AeonisClientSettings {
 
     fun save() {
         try {
-            Files.createDirectories(path.parent)
+            val parent = path.parent
+            if (parent != null) Files.createDirectories(parent)
             val root = JsonObject()
             root.addProperty("show_ability_hud", showAbilityHud)
             root.addProperty("show_cooldown_seconds", showCooldownSeconds)
@@ -78,6 +93,8 @@ object AeonisClientSettings {
             root.addProperty("large_form_camera", largeFormCamera)
             root.addProperty("camouflage_level", camouflageLevel.id)
             root.addProperty("show_form_details", showFormDetails)
+            root.addProperty("companion_speech_overlay", companionSpeechOverlay)
+            root.addProperty("companion_sound", companionSound)
             Files.writeString(path, gson.toJson(root), StandardCharsets.UTF_8)
         } catch (_: Exception) {
             // Read-only config directories exist; failing to save is not worth a crash.

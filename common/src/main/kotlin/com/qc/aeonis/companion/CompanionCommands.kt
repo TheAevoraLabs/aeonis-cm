@@ -104,6 +104,9 @@ object CompanionCommands {
             bot.navigation.stop()
             bot.target = null
             bot.scaffoldingEngine.cancelAscent()
+            // Drop any half-dug block too. Leaving progress on the old target is how a companion
+            // previously "came back and carried on" after being told to do something else.
+            bot.miningSession.reset()
         }
 
         val suffix = if (order.preemptsAutonomy) " §8(autonomy suspended)" else " §8(autonomy allowed)"
@@ -185,8 +188,19 @@ object CompanionCommands {
         )
         player.sendSystemMessage(Component.literal("§7Progression: §a${skills.progressionLoop.describeProgression()}"))
         player.sendSystemMessage(
-            Component.literal("§7Active skill: §f${skills.activeSkillId() ?: "idle"}§7${if (skills.lastSkillMessage.isNotEmpty()) " §8— ${skills.lastSkillMessage}" else ""}")
+            Component.literal("§7Active job: §f${skills.activeSkillId() ?: "idle"}§7 (${skills.activeSkillTicks}t)§7${if (skills.lastSkillMessage.isNotEmpty()) " §8— ${skills.lastSkillMessage}" else ""}")
         )
+        player.sendSystemMessage(Component.literal("§7Last hand-off: §8${skills.lastSwitchReason}"))
+
+        val mining = bot.miningSession
+        val mineTarget = mining.targetPos
+        val miningLine = if (mineTarget != null) {
+            "digging ${mineTarget.toShortString()} ${mining.progressPercent()}%" +
+                " (${mining.ticksSpent}t, broke ${mining.blocksBroken})"
+        } else {
+            "idle (broke ${mining.blocksBroken} this session)"
+        }
+        player.sendSystemMessage(Component.literal("§7Mining: §f$miningLine"))
         player.sendSystemMessage(
             Component.literal("§7Crafting table: §f${skills.craftingTableUnlock.describe()}")
         )

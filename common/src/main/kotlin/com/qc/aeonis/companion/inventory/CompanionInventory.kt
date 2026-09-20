@@ -78,6 +78,36 @@ class CompanionInventory : SimpleContainer(CONTAINER_SIZE) {
     }
 
     /**
+     * Moves the stack in [slot] into the main hand, swapping whatever was there back into
+     * [slot] so nothing is ever duplicated or lost.
+     *
+     * This is the only supported way to change the held item. Writing
+     * `mainHandItem = backpackStack` directly leaves the stack in two slots at once (which used
+     * to let the companion place blocks without spending them), and it is easy to get wrong in
+     * several places at once.
+     *
+     * @return the slot the displaced main-hand stack was moved to, or -1 when the main hand was
+     *   empty and nothing needed moving.
+     */
+    fun equipFromSlot(slot: Int): Int {
+        if (slot == MAINHAND_SLOT) return -1
+        if (slot < 0 || slot >= CONTAINER_SIZE) return -1
+
+        val incoming = getItem(slot)
+        if (incoming.isEmpty) return -1
+
+        val displaced = mainHandItem
+        mainHandItem = incoming
+        if (!displaced.isEmpty) {
+            setItem(slot, displaced)
+        } else {
+            setItem(slot, ItemStack.EMPTY)
+        }
+        setChanged()
+        return if (displaced.isEmpty) -1 else slot
+    }
+
+    /**
      * Attempts to store collected items into the 27 backpack slots first, then offhand if empty.
      */
     fun collectDrop(stack: ItemStack): ItemStack {
@@ -118,26 +148,6 @@ class CompanionInventory : SimpleContainer(CONTAINER_SIZE) {
             }
         }
         return true
-    }
-
-    /**
-     * Finds the best equipped or stored tool for breaking a given block state.
-     */
-    fun findBestTool(state: BlockState): ItemStack {
-        var bestTool = mainHandItem
-        var bestSpeed = bestTool.getDestroySpeed(state)
-
-        for (i in BACKPACK_START until CONTAINER_SIZE) {
-            val item = getItem(i)
-            if (!item.isEmpty) {
-                val speed = item.getDestroySpeed(state)
-                if (speed > bestSpeed) {
-                    bestSpeed = speed
-                    bestTool = item
-                }
-            }
-        }
-        return bestTool
     }
 
     fun save(output: ValueOutput) {

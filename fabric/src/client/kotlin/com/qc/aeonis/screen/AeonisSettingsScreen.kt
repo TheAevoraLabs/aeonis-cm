@@ -8,27 +8,40 @@ import net.fabricmc.api.EnvType
 import net.fabricmc.api.Environment
 import net.fabricmc.loader.api.FabricLoader
 import net.minecraft.client.gui.GuiGraphicsExtractor as GuiGraphics
+import net.minecraft.client.gui.components.Button
+import net.minecraft.client.gui.components.Tooltip
 import net.minecraft.client.gui.screens.Screen
-import net.minecraft.client.input.MouseButtonEvent
+import net.minecraft.client.renderer.RenderPipelines
+import net.minecraft.network.chat.CommonComponents
 import net.minecraft.network.chat.Component
-import net.minecraft.sounds.SoundEvents
+import net.minecraft.resources.Identifier
 
 /**
- * The Aeonis System Hub: futuristic holographic OS interface for client preferences,
- * manual archive reading, form telemetry, and quick tactical actions.
+ * Modern Sodium-grade options and control hub for Aeonis.
+ *
+ * Provides a clean Minecraft-authentic tabbed layout:
+ * - ⚙ General & HUD preferences
+ * - 🧬 Morph & Camouflage settings
+ * - 🤖 Companion AI options
+ * - ⚡ Tactical quick actions
+ * - 📖 Field Manual reader
+ *
+ * Built on native Minecraft widgets with robust resolution scaling and zero crashes.
  */
 @Environment(EnvType.CLIENT)
-class AeonisSettingsScreen(private val parent: Screen?) : Screen(Component.literal("Aeonis System Hub")) {
+class AeonisSettingsScreen(private val parent: Screen?) :
+    Screen(Component.translatable("options.aeonis.title")) {
 
-    enum class HubTab(val title: String) {
-        SYSTEM("⚙ SYSTEM"),
-        ARCHIVE("📖 ARCHIVE"),
-        MORPH("🧬 MORPH"),
-        ACTIONS("⚡ ACTIONS")
+    enum class CategoryTab(val title: String, val icon: String) {
+        GENERAL("General & HUD", "⚙"),
+        MORPH("Morph & Locomotion", "🧬"),
+        COMPANION("Companion AI", "🤖"),
+        ACTIONS("Tactical Actions", "⚡"),
+        MANUAL("Field Manual", "📖")
     }
 
-    private var currentTab: HubTab = HubTab.SYSTEM
-    private var selectedManualIndex: Int = 0
+    private var activeTab: CategoryTab = CategoryTab.GENERAL
+    private var selectedChapter: Int = 0
     private var manualPage: Int = 0
 
     private val modVersion: String = FabricLoader.getInstance()
@@ -36,552 +49,417 @@ class AeonisSettingsScreen(private val parent: Screen?) : Screen(Component.liter
         .map { it.metadata.version.friendlyString }
         .orElse("5.0.0")
 
+    private val aeonisIcon = Identifier.fromNamespaceAndPath("aeonis", "textures/gui/aeonis_icon.png")
+
     override fun init() {
         super.init()
         AeonisClientSettings.load()
+        rebuildScreenWidgets()
+    }
+
+    private fun rebuildScreenWidgets() {
+        clearWidgets()
+
+        val dialogW = minOf(600, width - 24)
+        val dialogH = minOf(330, height - 24)
+        val left = (width - dialogW) / 2
+        val top = (height - dialogH) / 2
+
+        val sidebarW = 135
+        val contentX = left + sidebarW + 8
+        val contentW = dialogW - sidebarW - 16
+        val contentY = top + 42
+
+        // 1. Sidebar Category Buttons
+        CategoryTab.entries.forEachIndexed { idx, tab ->
+            val tabY = top + 42 + idx * 24
+            val isCurrent = tab == activeTab
+            val prefix = if (isCurrent) "▶ " else "  "
+            val label = "$prefix${tab.icon} ${tab.title}"
+
+            addRenderableWidget(
+                Button.builder(Component.literal(label)) {
+                    if (activeTab != tab) {
+                        activeTab = tab
+                        manualPage = 0
+                        rebuildScreenWidgets()
+                    }
+                }.bounds(left + 6, tabY, sidebarW - 4, 20).build().apply {
+                    active = !isCurrent
+                }
+            )
+        }
+
+        // 2. Right Pane Widgets based on Active Tab
+        when (activeTab) {
+            CategoryTab.GENERAL -> buildGeneralTabWidgets(contentX, contentY, contentW)
+            CategoryTab.MORPH -> buildMorphTabWidgets(contentX, contentY, contentW)
+            CategoryTab.COMPANION -> buildCompanionTabWidgets(contentX, contentY, contentW)
+            CategoryTab.ACTIONS -> buildActionsTabWidgets(contentX, contentY, contentW)
+            CategoryTab.MANUAL -> buildManualTabWidgets(contentX, contentY, contentW)
+        }
+
+        // 3. Footer Buttons
+        val footerY = top + dialogH - 26
+        addRenderableWidget(
+            Button.builder(CommonComponents.GUI_DONE) { onClose() }
+                .bounds(left + dialogW - 106, footerY, 100, 20)
+                .build()
+        )
+    }
+
+    // ---------------------------------------------------------------- GENERAL TAB
+    private fun buildGeneralTabWidgets(x: Int, startY: Int, w: Int) {
+        var curY = startY
+
+        // Toggle: Ability HUD
+        addOptionToggle(
+            x, curY, w,
+            title = "Ability HUD",
+            desc = "Show active abilities, cooldowns and hotkeys when possessing mobs",
+            read = { AeonisClientSettings.showAbilityHud },
+            write = { AeonisClientSettings.showAbilityHud = it }
+        )
+        curY += 28
+
+        // Toggle: Cooldown Timers
+        addOptionToggle(
+            x, curY, w,
+            title = "Cooldown Seconds",
+            desc = "Display numeric countdown seconds directly on ability icons",
+            read = { AeonisClientSettings.showCooldownSeconds },
+            write = { AeonisClientSettings.showCooldownSeconds = it }
+        )
+        curY += 28
+
+        // Toggle: Form Hints
+        addOptionToggle(
+            x, curY, w,
+            title = "Morph Guidance Hints",
+            desc = "Show keybind and locomotion hints when entering a new mob body",
+            read = { AeonisClientSettings.showFormHints },
+            write = { AeonisClientSettings.showFormHints = it }
+        )
+        curY += 28
+
+        // Toggle: Dynamic Form Camera
+        addOptionToggle(
+            x, curY, w,
+            title = "Dynamic Form Camera",
+            desc = "Automatically offset 3rd person camera distance for giant mob forms",
+            read = { AeonisClientSettings.largeFormCamera },
+            write = { AeonisClientSettings.largeFormCamera = it }
+        )
+    }
+
+    // ---------------------------------------------------------------- MORPH TAB
+    private fun buildMorphTabWidgets(x: Int, startY: Int, w: Int) {
+        var curY = startY
+
+        // Camouflage Selector
+        val btnW = 110
+        val camoBtn = Button.builder(Component.literal(AeonisClientSettings.camouflageLevel.label)) {
+            val levels = CamouflageLevel.entries
+            val nextIdx = (AeonisClientSettings.camouflageLevel.ordinal + 1) % levels.size
+            AeonisClientSettings.camouflageLevel = levels[nextIdx]
+            AeonisClientSettings.save()
+            rebuildScreenWidgets()
+        }.bounds(x + w - btnW, curY, btnW, 20)
+            .tooltip(Tooltip.create(Component.literal(AeonisClientSettings.camouflageLevel.description)))
+            .build()
+        addRenderableWidget(camoBtn)
+        curY += 28
+
+        // Toggle: Locomotion Details
+        addOptionToggle(
+            x, curY, w,
+            title = "Locomotion Details in HUD",
+            desc = "Show movement mechanics (flying, swimming, leaping) on the screen banner",
+            read = { AeonisClientSettings.showFormDetails },
+            write = { AeonisClientSettings.showFormDetails = it }
+        )
+        curY += 34
+
+        // Action: Open Form Matrix Catalogue
+        val catBtn = Button.builder(Component.literal("Browse Form Matrix...")) {
+            minecraft?.gui?.setScreen(AeonisFormBrowserScreen(this))
+        }.bounds(x, curY, w, 22)
+            .tooltip(Tooltip.create(Component.literal("Explore 90+ registered mob forms, abilities, flight mechanics & physics")))
+            .build()
+        addRenderableWidget(catBtn)
+    }
+
+    // ---------------------------------------------------------------- COMPANION TAB
+    private fun buildCompanionTabWidgets(x: Int, startY: Int, w: Int) {
+        var curY = startY
+
+        // Toggle: Companion Speech Overlay
+        addOptionToggle(
+            x, curY, w,
+            title = "Speech Dialogue Card",
+            desc = "Show floating translucent companion dialogue cards with typewriter effect",
+            read = { AeonisClientSettings.companionSpeechOverlay },
+            write = { AeonisClientSettings.companionSpeechOverlay = it }
+        )
+        curY += 28
+
+        // Toggle: Typewriter Sound
+        addOptionToggle(
+            x, curY, w,
+            title = "Typewriter Audio",
+            desc = "Play crisp click sound feedback as companion messages type out",
+            read = { AeonisClientSettings.companionSound },
+            write = { AeonisClientSettings.companionSound = it }
+        )
+    }
+
+    // ---------------------------------------------------------------- ACTIONS TAB
+    private fun buildActionsTabWidgets(x: Int, startY: Int, w: Int) {
+        var curY = startY
+        val actions = listOf(
+            Triple("Return to Player Body", "untransform", "Terminate mob possession and return to your player body"),
+            Triple("Inspect Current Form", "transform info", "Analyze active form stats, locomotion family and kit"),
+            Triple("Possess Random Mob", "transform random", "Instantly transform into a randomly selected registered mob"),
+            Triple("Run System Diagnostics", "aeonis diagnostics", "Audit registry status, neural inference and locomotion hooks")
+        )
+
+        actions.forEach { (label, cmd, tooltipText) ->
+            addRenderableWidget(
+                Button.builder(Component.literal(label)) {
+                    val conn = minecraft?.player?.connection
+                    if (conn != null) {
+                        conn.sendCommand(cmd)
+                        onClose()
+                    }
+                }.bounds(x, curY, w, 20)
+                    .tooltip(Tooltip.create(Component.literal(tooltipText)))
+                    .build()
+            )
+            curY += 26
+        }
+    }
+
+    // ---------------------------------------------------------------- MANUAL TAB
+    private fun buildManualTabWidgets(x: Int, startY: Int, w: Int) {
+        val totalSections = AeonisManual.sections.size
+        selectedChapter = selectedChapter.coerceIn(0, maxOf(0, totalSections - 1))
+        val section = AeonisManual.sections.getOrNull(selectedChapter) ?: return
+
+        // Chapter selector header
+        val headerY = startY
+        val prevChBtn = Button.builder(Component.literal("◀")) {
+            if (selectedChapter > 0) {
+                selectedChapter--
+                manualPage = 0
+                rebuildScreenWidgets()
+            }
+        }.bounds(x, headerY, 20, 18).build()
+        prevChBtn.active = selectedChapter > 0
+        addRenderableWidget(prevChBtn)
+
+        val nextChBtn = Button.builder(Component.literal("▶")) {
+            if (selectedChapter < totalSections - 1) {
+                selectedChapter++
+                manualPage = 0
+                rebuildScreenWidgets()
+            }
+        }.bounds(x + w - 20, headerY, 20, 18).build()
+        nextChBtn.active = selectedChapter < totalSections - 1
+        addRenderableWidget(nextChBtn)
+
+        // Pagination buttons at bottom of content
+        val pageY = headerY + 148
+        val prevPgBtn = Button.builder(Component.literal("◀ Prev Page")) {
+            if (manualPage > 0) {
+                manualPage--
+                rebuildScreenWidgets()
+            }
+        }.bounds(x, pageY, 80, 18).build()
+        prevPgBtn.active = manualPage > 0
+        addRenderableWidget(prevPgBtn)
+
+        val nextPgBtn = Button.builder(Component.literal("Next Page ▶")) {
+            manualPage++
+            rebuildScreenWidgets()
+        }.bounds(x + w - 80, pageY, 80, 18).build()
+        addRenderableWidget(nextPgBtn)
+    }
+
+    private fun addOptionToggle(
+        x: Int,
+        y: Int,
+        w: Int,
+        title: String,
+        desc: String,
+        read: () -> Boolean,
+        write: (Boolean) -> Unit
+    ) {
+        val btnW = 75
+        val toggleBtn = Button.builder(toggleComponent(read())) {
+            val next = !read()
+            write(next)
+            AeonisClientSettings.save()
+            rebuildScreenWidgets()
+        }.bounds(x + w - btnW, y, btnW, 20)
+            .tooltip(Tooltip.create(Component.literal(desc)))
+            .build()
+
+        addRenderableWidget(toggleBtn)
+    }
+
+    private fun toggleComponent(enabled: Boolean): Component =
+        if (enabled) Component.literal("§a[ ON ]") else Component.literal("§7[ OFF ]")
+
+    // ---------------------------------------------------------------- RENDERING
+    override fun extractBackground(graphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
+        if (minecraft?.level != null) {
+            extractTransparentBackground(graphics)
+        } else {
+            super.extractBackground(graphics, mouseX, mouseY, partialTick)
+        }
     }
 
     override fun extractRenderState(graphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
+        val dialogW = minOf(600, width - 24)
+        val dialogH = minOf(330, height - 24)
+        val left = (width - dialogW) / 2
+        val top = (height - dialogH) / 2
+
+        val sidebarW = 135
+        val contentX = left + sidebarW + 8
+        val contentW = dialogW - sidebarW - 16
+        val contentY = top + 42
+
+        // 1. Dark graphite window container
+        graphics.fill(left, top, left + dialogW, top + dialogH, 0xEE12151E.toInt())
+
+        // 2. 3D Bevel borders
+        graphics.fill(left, top, left + dialogW, top + 1, 0xFF4A5260.toInt())
+        graphics.fill(left, top, left + 1, top + dialogH, 0xFF4A5260.toInt())
+        graphics.fill(left, top + dialogH - 1, left + dialogW, top + dialogH, 0xFF0E1017.toInt())
+        graphics.fill(left + dialogW - 1, top, left + dialogW, top + dialogH, 0xFF0E1017.toInt())
+
+        // 3. Header bar
+        graphics.fill(left + 1, top + 1, left + dialogW - 1, top + 34, 0xD01E222D.toInt())
+        graphics.fill(left + 1, top + 34, left + dialogW - 1, top + 35, 0xFF2A2F3D.toInt())
+
+        // Icon (16x16)
+        try {
+            graphics.blit(RenderPipelines.GUI_TEXTURED, aeonisIcon, left + 8, top + 9, 0f, 0f, 16, 16, 16, 16)
+        } catch (_: Throwable) {}
+
+        graphics.text(font, "AEONIS // OPTIONS & CONTROL", left + 28, top + 8, 0xFFFFFF)
+        graphics.text(font, "v$modVersion • Minecraft 26.3", left + 28, top + 20, 0x8FA0BE)
+
+        // Live form status badge in header
+        drawLiveStatusBadge(graphics, left + dialogW - 12, top + 12)
+
+        // 4. Sidebar / Content divider
+        graphics.fill(left + sidebarW + 2, top + 35, left + sidebarW + 3, top + dialogH - 30, 0xFF2A2F3D.toInt())
+
+        // 5. Option Labels in Active Tab
+        renderActiveTabLabels(graphics, contentX, contentY, contentW)
+
+        // 6. Bottom status line
+        val configLabel = "Config: config/aeonis-client.json"
+        graphics.text(font, configLabel, left + 8, top + dialogH - 18, 0x64748B)
+
+        // 7. Render all interactive widgets on top
         super.extractRenderState(graphics, mouseX, mouseY, partialTick)
-
-        val panelW = minOf(510, width - 16)
-        val panelH = minOf(310, height - 16)
-        val px = (width - panelW) / 2
-        val py = (height - panelH) / 2
-
-        // 1. Futuristic Glassmorphic Canvas Backdrop
-        graphics.fill(px, py, px + panelW, py + panelH, 0xF4070B14.toInt())
-
-        // 2. High-Tech Cyber Accent Borders
-        graphics.fill(px, py, px + panelW, py + 1, 0xFF00F0FF.toInt())
-        graphics.fill(px, py + panelH - 1, px + panelW, py + panelH, 0xFF1E293B.toInt())
-        graphics.fill(px, py + 1, px + 1, py + panelH, 0xFF00F0FF.toInt())
-        graphics.fill(px + panelW - 1, py + 1, px + panelW, py + panelH, 0xFF1E293B.toInt())
-
-        // Top Accent Corner Marker
-        graphics.fill(px, py, px + 12, py + 2, 0xFF00F0FF.toInt())
-        graphics.fill(px, py, px + 2, py + 12, 0xFF00F0FF.toInt())
-
-        // 3. Top Header Bar
-        graphics.fill(px + 1, py + 1, px + panelW - 1, py + 24, 0x900B132B.toInt())
-        graphics.text(font, "AEONIS // SYSTEM HUB", px + 8, py + 8, 0xFF00F0FF.toInt())
-        val verText = "v$modVersion"
-        graphics.text(font, verText, px + panelW - font.width(verText) - 76, py + 8, 0xFF64748B.toInt())
-        graphics.text(font, "● READY", px + panelW - 68, py + 8, 0xFF10B981.toInt())
-
-        graphics.fill(px + 1, py + 24, px + panelW - 1, py + 25, 0xFF1E293B.toInt())
-
-        // 4. Tab Navigation Bar (y: py + 26 .. py + 46)
-        val tabW = (panelW - 12) / HubTab.entries.size
-        HubTab.entries.forEachIndexed { idx, tab ->
-            val tx = px + 6 + idx * tabW
-            val ty = py + 26
-            val isCurrent = tab == currentTab
-            val isHover = mouseX in tx until (tx + tabW - 2) && mouseY in ty until (ty + 20)
-
-            val tabBg = when {
-                isCurrent -> 0xFF1E293B.toInt()
-                isHover -> 0x80162032.toInt()
-                else -> 0x400A0F1D.toInt()
-            }
-            graphics.fill(tx, ty, tx + tabW - 2, ty + 20, tabBg)
-
-            if (isCurrent) {
-                graphics.fill(tx, ty + 18, tx + tabW - 2, ty + 20, 0xFF00F0FF.toInt())
-            }
-
-            val textCol = if (isCurrent) 0xFF00F0FF.toInt() else if (isHover) 0xFFE2E8F0.toInt() else 0xFF94A3B8.toInt()
-            val tw = font.width(tab.title)
-            graphics.text(font, tab.title, tx + (tabW - 2 - tw) / 2, ty + 6, textCol)
-        }
-
-        // Separator below tabs
-        graphics.fill(px + 1, py + 48, px + panelW - 1, py + 49, 0xFF1E293B.toInt())
-
-        // 5. Dynamic Tab View Content
-        val contentY = py + 52
-        val contentH = panelH - 78
-        when (currentTab) {
-            HubTab.SYSTEM -> renderSystemTab(graphics, px + 8, contentY, panelW - 16, contentH, mouseX, mouseY)
-            HubTab.ARCHIVE -> renderArchiveTab(graphics, px + 8, contentY, panelW - 16, contentH, mouseX, mouseY)
-            HubTab.MORPH -> renderMorphTab(graphics, px + 8, contentY, panelW - 16, contentH, mouseX, mouseY)
-            HubTab.ACTIONS -> renderActionsTab(graphics, px + 8, contentY, panelW - 16, contentH, mouseX, mouseY)
-        }
-
-        // 6. Bottom Status Bar
-        graphics.fill(px + 1, py + panelH - 24, px + panelW - 1, py + panelH - 23, 0xFF1E293B.toInt())
-        val configMsg = "Config: config/aeonis-client.json"
-        graphics.text(font, configMsg, px + 8, py + panelH - 16, 0xFF475569.toInt())
-
-        // Close Button
-        val closeW = 90
-        val closeH = 16
-        val cx = px + panelW - closeW - 6
-        val cy = py + panelH - 20
-        val closeHover = mouseX in cx until (cx + closeW) && mouseY in cy until (cy + closeH)
-        graphics.fill(cx, cy, cx + closeW, cy + closeH, if (closeHover) 0xFF1E293B.toInt() else 0xFF0F172A.toInt())
-        graphics.fill(cx, cy, cx + closeW, cy + 1, if (closeHover) 0xFF00F0FF.toInt() else 0xFF1E293B.toInt())
-        graphics.fill(cx, cy + closeH - 1, cx + closeW, cy + closeH, if (closeHover) 0xFF00F0FF.toInt() else 0xFF1E293B.toInt())
-        graphics.fill(cx, cy + 1, cx + 1, cy + closeH, if (closeHover) 0xFF00F0FF.toInt() else 0xFF1E293B.toInt())
-        graphics.fill(cx + closeW - 1, cy + 1, cx + closeW, cy + closeH, if (closeHover) 0xFF00F0FF.toInt() else 0xFF1E293B.toInt())
-
-        val closeText = "CLOSE HUB [ESC]"
-        val ctw = font.width(closeText)
-        graphics.text(font, closeText, cx + (closeW - ctw) / 2, cy + 4, if (closeHover) 0xFF00F0FF.toInt() else 0xFF94A3B8.toInt())
     }
 
-    // ------------------------------------------------------------- TAB 1: SYSTEM
-    private fun renderSystemTab(graphics: GuiGraphics, x: Int, y: Int, w: Int, h: Int, mouseX: Int, mouseY: Int) {
-        val colW = (w - 8) / 2
-        val rowH = 32
-
-        // Row 1
-        drawToggleCard(graphics, x, y, colW, rowH, "Ability HUD", "Show ability hotkeys & form banner", AeonisClientSettings.showAbilityHud, mouseX, mouseY)
-        drawToggleCard(graphics, x + colW + 8, y, colW, rowH, "Cooldown Timers", "Display cooldown countdowns in seconds", AeonisClientSettings.showCooldownSeconds, mouseX, mouseY)
-
-        // Row 2
-        drawToggleCard(graphics, x, y + rowH + 6, colW, rowH, "Form Details", "Display movement style & traits", AeonisClientSettings.showFormDetails, mouseX, mouseY)
-        drawToggleCard(graphics, x + colW + 8, y + rowH + 6, colW, rowH, "Input Hints", "Show keybind hints when morphing", AeonisClientSettings.showFormHints, mouseX, mouseY)
-
-        // Row 3 (Col 1)
-        drawToggleCard(graphics, x, y + (rowH + 6) * 2, colW, rowH, "Dynamic Camera", "Distance offset for colossal mob forms", AeonisClientSettings.largeFormCamera, mouseX, mouseY)
-
-        // Camouflage Section Card (below toggles)
-        val camoY = y + (rowH + 6) * 3 + 4
-        val camoH = h - (camoY - y)
-        graphics.fill(x, camoY, x + w, camoY + camoH, 0x800A0F1D.toInt())
-        graphics.fill(x, camoY, x + w, camoY + 1, 0xFF1E293B.toInt())
-        graphics.fill(x, camoY + camoH - 1, x + w, camoY + camoH, 0xFF1E293B.toInt())
-        graphics.fill(x, camoY, x + 1, camoY + camoH, 0xFF1E293B.toInt())
-        graphics.fill(x + w - 1, camoY, x + w, camoY + camoH, 0xFF1E293B.toInt())
-
-        graphics.text(font, "CAMOUFLAGE PROTOCOL", x + 8, camoY + 6, 0xFF38BDF8.toInt())
-
-        // 3 Camouflage Selector Chips
-        val chipW = (w - 24) / 3
-        CamouflageLevel.entries.forEachIndexed { i, level ->
-            val cx = x + 8 + i * (chipW + 4)
-            val cy = camoY + 18
-            val isSelected = AeonisClientSettings.camouflageLevel == level
-            val isHover = mouseX in cx until (cx + chipW) && mouseY in cy until (cy + 18)
-
-            val chipBg = if (isSelected) 0xFF1E293B.toInt() else if (isHover) 0x90162032.toInt() else 0x400F172A.toInt()
-            graphics.fill(cx, cy, cx + chipW, cy + 18, chipBg)
-            val chipBorder = if (isSelected) 0xFF00F0FF.toInt() else if (isHover) 0xFF38BDF8.toInt() else 0xFF1E293B.toInt()
-            graphics.fill(cx, cy, cx + chipW, cy + 1, chipBorder)
-            graphics.fill(cx, cy + 17, cx + chipW, cy + 18, chipBorder)
-            graphics.fill(cx, cy + 1, cx + 1, cy + 17, chipBorder)
-            graphics.fill(cx + chipW - 1, cy + 1, cx + chipW, cy + 17, chipBorder)
-
-            val lText = level.label.uppercase()
-            val ltw = font.width(lText)
-            val lcol = if (isSelected) 0xFF00F0FF.toInt() else 0xFF94A3B8.toInt()
-            graphics.text(font, lText, cx + (chipW - ltw) / 2, cy + 5, lcol)
-        }
-
-        // Camouflage Description
-        val desc = AeonisClientSettings.camouflageLevel.description
-        graphics.text(font, trimText(desc, w - 16), x + 8, camoY + 42, 0xFF94A3B8.toInt())
-    }
-
-    private fun drawToggleCard(
-        graphics: GuiGraphics,
-        cx: Int,
-        cy: Int,
-        cw: Int,
-        ch: Int,
-        title: String,
-        subtitle: String,
-        value: Boolean,
-        mouseX: Int,
-        mouseY: Int
-    ) {
-        val hover = mouseX in cx until (cx + cw) && mouseY in cy until (cy + ch)
-        val bg = if (hover) 0xFF162032.toInt() else 0xFF0F172A.toInt()
-        val border = if (hover) 0xFF00F0FF.toInt() else 0xFF1E293B.toInt()
-
-        graphics.fill(cx, cy, cx + cw, cy + ch, bg)
-        graphics.fill(cx, cy, cx + cw, cy + 1, border)
-        graphics.fill(cx, cy + ch - 1, cx + cw, cy + ch, border)
-        graphics.fill(cx, cy + 1, cx + 1, cy + ch - 1, border)
-        graphics.fill(cx + cw - 1, cy + 1, cx + cw, cy + ch - 1, border)
-
-        graphics.text(font, title, cx + 6, cy + 5, 0xFFE2E8F0.toInt())
-        graphics.text(font, trimText(subtitle, cw - 46), cx + 6, cy + 18, 0xFF64748B.toInt())
-
-        // Toggle Switch Pill
-        val swW = 32
-        val swH = 14
-        val swX = cx + cw - swW - 6
-        val swY = cy + (ch - swH) / 2
-        val swBg = if (value) 0xFF10B981.toInt() else 0xFF334155.toInt()
-        graphics.fill(swX, swY, swX + swW, swY + swH, swBg)
-        val pillText = if (value) "ON" else "OFF"
-        val ptw = font.width(pillText)
-        graphics.text(font, pillText, swX + (swW - ptw) / 2, swY + 3, 0xFFFFFFFF.toInt())
-    }
-
-    // ------------------------------------------------------------- TAB 2: ARCHIVE (MANUAL)
-    private fun renderArchiveTab(graphics: GuiGraphics, x: Int, y: Int, w: Int, h: Int, mouseX: Int, mouseY: Int) {
-        val listW = 140
-
-        // Left Sub-Panel: Chapter List
-        graphics.fill(x, y, x + listW, y + h, 0x800B1220.toInt())
-        graphics.fill(x + listW, y, x + listW + 1, y + h, 0xFF1E293B.toInt())
-
-        val itemH = 16
-        AeonisManual.sections.forEachIndexed { i, sec ->
-            val iy = y + 2 + i * (itemH + 1)
-            if (iy + itemH <= y + h) {
-                val isSel = i == selectedManualIndex
-                val isHov = mouseX in x until (x + listW) && mouseY in iy until (iy + itemH)
-
-                if (isSel) {
-                    graphics.fill(x, iy, x + listW, iy + itemH, 0xFF1E293B.toInt())
-                    graphics.fill(x, iy, x + 2, iy + itemH, 0xFF00F0FF.toInt())
-                } else if (isHov) {
-                    graphics.fill(x, iy, x + listW, iy + itemH, 0x401E293B.toInt())
-                }
-
-                val title = trimText(sec.title, listW - 8)
-                val tCol = if (isSel) 0xFF00F0FF.toInt() else if (isHov) 0xFFE2E8F0.toInt() else 0xFF94A3B8.toInt()
-                graphics.text(font, title, x + 5, iy + 4, tCol)
-            }
-        }
-
-        // Right Sub-Panel: Document Reader
-        val rx = x + listW + 8
-        val rw = w - listW - 8
-        val section = AeonisManual.sections.getOrNull(selectedManualIndex)
-        if (section != null) {
-            graphics.text(font, section.title.uppercase(), rx, y + 2, 0xFF38BDF8.toInt())
-            graphics.fill(rx, y + 14, rx + rw, y + 15, 0xFF1E293B.toInt())
-
-            // Wrap and paginate paragraphs
-            val wrappedLines = mutableListOf<String>()
-            section.body.forEach { para ->
-                wrappedLines += wrapParagraph(para, rw - 8)
-                wrappedLines += ""
-            }
-
-            val linesPerPage = (h - 44) / 10
-            val totalPages = maxOf(1, (wrappedLines.size + linesPerPage - 1) / linesPerPage)
-            manualPage = manualPage.coerceIn(0, totalPages - 1)
-
-            val pageStart = manualPage * linesPerPage
-            val pageLines = wrappedLines.drop(pageStart).take(linesPerPage)
-
-            var lineY = y + 20
-            pageLines.forEach { line ->
-                graphics.text(font, line, rx, lineY, 0xFFCBD5E1.toInt())
-                lineY += 10
-            }
-
-            // Pagination Controls at bottom
-            val btnY = y + h - 18
-            val pageText = "Page ${manualPage + 1} of $totalPages"
-            graphics.text(font, pageText, rx + rw / 2 - font.width(pageText) / 2, btnY + 4, 0xFF64748B.toInt())
-
-            drawMiniButton(graphics, rx, btnY, 50, 16, "< PREV", mouseX, mouseY, manualPage > 0)
-            drawMiniButton(graphics, rx + rw - 50, btnY, 50, 16, "NEXT >", mouseX, mouseY, manualPage < totalPages - 1)
-        }
-    }
-
-    private fun drawMiniButton(graphics: GuiGraphics, bx: Int, by: Int, bw: Int, bh: Int, label: String, mouseX: Int, mouseY: Int, enabled: Boolean) {
-        val hover = enabled && mouseX in bx until (bx + bw) && mouseY in by until (by + bh)
-        val bg = if (hover) 0xFF1E293B.toInt() else 0xFF0F172A.toInt()
-        val border = if (hover) 0xFF00F0FF.toInt() else 0xFF1E293B.toInt()
-        graphics.fill(bx, by, bx + bw, by + bh, bg)
-        graphics.fill(bx, by, bx + bw, by + 1, border)
-        graphics.fill(bx, by + bh - 1, bx + bw, by + bh, border)
-        graphics.fill(bx, by + 1, bx + 1, by + bh - 1, border)
-        graphics.fill(bx + bw - 1, by + 1, bx + bw, by + bh - 1, border)
-
-        val col = if (!enabled) 0xFF475569.toInt() else if (hover) 0xFF00F0FF.toInt() else 0xFF94A3B8.toInt()
-        val tw = font.width(label)
-        graphics.text(font, label, bx + (bw - tw) / 2, by + (bh - 8) / 2, col)
-    }
-
-    // ------------------------------------------------------------- TAB 3: MORPH TELEMETRY
-    private fun renderMorphTab(graphics: GuiGraphics, x: Int, y: Int, w: Int, h: Int, mouseX: Int, mouseY: Int) {
-        // Active Form Card
-        graphics.fill(x, y, x + w, y + 80, 0x800F172A.toInt())
-        graphics.fill(x, y, x + w, y + 1, 0xFF1E293B.toInt())
-        graphics.fill(x, y + 79, x + w, y + 80, 0xFF1E293B.toInt())
-        graphics.fill(x, y, x + 1, y + 80, 0xFF1E293B.toInt())
-        graphics.fill(x + w - 1, y, x + w, y + 80, 0xFF1E293B.toInt())
-
-        graphics.text(font, "ACTIVE NEURAL TELEMETRY", x + 8, y + 8, 0xFF38BDF8.toInt())
-
-        if (AeonisClientNetworking.isControlling()) {
-            val mob = minecraft?.level?.getEntity(AeonisClientNetworking.getControlledMobId()) as? net.minecraft.world.entity.Mob
+    private fun drawLiveStatusBadge(graphics: GuiGraphics, rightX: Int, y: Int) {
+        val (text, color) = if (AeonisClientNetworking.isControlling()) {
+            val mob = minecraft?.level?.getEntity(AeonisClientNetworking.getControlledMobId())
+                as? net.minecraft.world.entity.Mob
             if (mob != null) {
-                val formName = mob.type.description.string
-                val movement = MobMovementProfiles.profileFor(mob).describe()
-                val abilities = MobCatalogue.summary(mob.type).abilities.size
-
-                graphics.text(font, "CURRENT FORM: $formName", x + 8, y + 24, 0xFF10B981.toInt())
-                graphics.text(font, "LOCOMOTION: $movement", x + 8, y + 38, 0xFFE2E8F0.toInt())
-                graphics.text(font, "REGISTERED ABILITIES: $abilities", x + 8, y + 52, 0xFF00F0FF.toInt())
-                graphics.text(font, "CAMOUFLAGE: ${AeonisClientSettings.camouflageLevel.label}", x + 8, y + 66, 0xFFF59E0B.toInt())
+                "● MORPHED: ${mob.type.description.string.uppercase()}" to 0x10B981
             } else {
-                graphics.text(font, "Possessing an entity that is not a standard mob.", x + 8, y + 30, 0xFFE2E8F0.toInt())
+                "● MORPHED: ACTIVE" to 0x10B981
             }
         } else {
-            graphics.text(font, "STATUS: STANDBY (HUMAN FORM)", x + 8, y + 26, 0xFF94A3B8.toInt())
-            graphics.text(font, "Crosshair over any living mob and press G to initiate neural link.", x + 8, y + 42, 0xFF64748B.toInt())
-            graphics.text(font, "Press H to terminate possession and restore your original body.", x + 8, y + 56, 0xFF64748B.toInt())
+            "● STANDBY (HUMAN)" to 0x94A3B8
         }
-
-        // Form Catalogue Launcher Card
-        val launchY = y + 90
-        val launchH = h - 90
-        graphics.fill(x, launchY, x + w, launchY + launchH, 0x800F172A.toInt())
-        graphics.fill(x, launchY, x + w, launchY + 1, 0xFF1E293B.toInt())
-        graphics.fill(x, launchY + launchH - 1, x + w, launchY + launchH, 0xFF1E293B.toInt())
-        graphics.fill(x, launchY, x + 1, launchY + launchH, 0xFF1E293B.toInt())
-        graphics.fill(x + w - 1, launchY, x + w, launchY + launchH, 0xFF1E293B.toInt())
-
-        graphics.text(font, "FORM MATRIX CATALOGUE", x + 8, launchY + 10, 0xFF38BDF8.toInt())
-        graphics.text(font, "Explore 90+ registered mob forms, flight mechanics, and special abilities.", x + 8, launchY + 26, 0xFF94A3B8.toInt())
-
-        // Catalogue Button
-        val catW = 180
-        val catH = 22
-        val catX = x + 8
-        val catY = launchY + 44
-        val catHover = mouseX in catX until (catX + catW) && mouseY in catY until (catY + catH)
-        graphics.fill(catX, catY, catX + catW, catY + catH, if (catHover) 0xFF1E293B.toInt() else 0xFF0B132B.toInt())
-        val catBorder = if (catHover) 0xFF00F0FF.toInt() else 0xFF1E293B.toInt()
-        graphics.fill(catX, catY, catX + catW, catY + 1, catBorder)
-        graphics.fill(catX, catY + catH - 1, catX + catW, catY + catH, catBorder)
-        graphics.fill(catX, catY + 1, catX + 1, catY + catH - 1, catBorder)
-        graphics.fill(catX + catW - 1, catY + 1, catX + catW, catY + catH - 1, catBorder)
-
-        val catText = "OPEN FORM CATALOGUE ->"
-        val ctw = font.width(catText)
-        graphics.text(font, catText, catX + (catW - ctw) / 2, catY + 7, if (catHover) 0xFF00F0FF.toInt() else 0xFF00F0FF.toInt())
+        val tw = font.width(text)
+        graphics.text(font, text, rightX - tw, y, color)
     }
 
-    // ------------------------------------------------------------- TAB 4: QUICK ACTIONS
-    private fun renderActionsTab(graphics: GuiGraphics, x: Int, y: Int, w: Int, h: Int, mouseX: Int, mouseY: Int) {
-        val actions = listOf(
-            Triple("⚡ POSSESS RANDOM", "Morph into a random registered entity", "transform random"),
-            Triple("🔍 INSPECT FORM", "Analyze current form attributes & stats", "transform info"),
-            Triple("📜 LIST ABILITIES", "Show all hotkeys & abilities in chat", "transform abilities"),
-            Triple("↩ RETURN TO BODY", "Terminate link and restore player body", "untransform"),
-            Triple("🛠 RUN DIAGNOSTICS", "Execute full system diagnostic audit", "aeonis diagnostics")
-        )
-
-        val itemH = 34
-        actions.forEachIndexed { i, (title, desc, _) ->
-            val iy = y + i * (itemH + 6)
-            if (iy + itemH <= y + h) {
-                val isHover = mouseX in x until (x + w) && mouseY in iy until (iy + itemH)
-                val bg = if (isHover) 0xFF162032.toInt() else 0xFF0F172A.toInt()
-                val border = if (isHover) 0xFF00F0FF.toInt() else 0xFF1E293B.toInt()
-
-                graphics.fill(x, iy, x + w, iy + itemH, bg)
-                graphics.fill(x, iy, x + w, iy + 1, border)
-                graphics.fill(x, iy + itemH - 1, x + w, iy + itemH, border)
-                graphics.fill(x, iy + 1, x + 1, iy + itemH - 1, border)
-                graphics.fill(x + w - 1, iy + 1, x + w, iy + itemH - 1, border)
-
-                graphics.text(font, title, x + 8, iy + 6, if (isHover) 0xFF00F0FF.toInt() else 0xFFE2E8F0.toInt())
-                graphics.text(font, desc, x + 8, iy + 19, 0xFF64748B.toInt())
-
-                val execText = "[ EXECUTE ]"
-                val etw = font.width(execText)
-                graphics.text(font, execText, x + w - etw - 10, iy + 13, if (isHover) 0xFF00F0FF.toInt() else 0xFF38BDF8.toInt())
-            }
-        }
-    }
-
-    override fun mouseClicked(event: MouseButtonEvent, doubleClick: Boolean): Boolean {
-        val mx = event.x.toInt()
-        val my = event.y.toInt()
-
-        val panelW = minOf(510, width - 16)
-        val panelH = minOf(310, height - 16)
-        val px = (width - panelW) / 2
-        val py = (height - panelH) / 2
-
-        if (event.button() == 0) {
-            // Check Close button
-            val closeW = 90
-            val closeH = 16
-            val cx = px + panelW - closeW - 6
-            val cy = py + panelH - 20
-            if (mx in cx until (cx + closeW) && my in cy until (cy + closeH)) {
-                onClose()
-                return true
-            }
-
-            // Check Tab click
-            val tabW = (panelW - 12) / HubTab.entries.size
-            HubTab.entries.forEachIndexed { idx, tab ->
-                val tx = px + 6 + idx * tabW
-                val ty = py + 26
-                if (mx in tx until (tx + tabW - 2) && my in ty until (ty + 20)) {
-                    currentTab = tab
-                    playClick()
-                    return true
+    private fun renderActiveTabLabels(graphics: GuiGraphics, x: Int, startY: Int, w: Int) {
+        when (activeTab) {
+            CategoryTab.GENERAL -> {
+                var curY = startY
+                val labels = listOf(
+                    "Ability HUD" to "Keybinds & form banner while possessing mobs",
+                    "Cooldown Timers" to "Numeric countdown seconds on ability icons",
+                    "Morph Hints" to "Keybind guidance when entering a new form",
+                    "Dynamic Camera" to "Zoom offset for large & colossal mob forms"
+                )
+                labels.forEach { (title, subtitle) ->
+                    graphics.text(font, title, x, curY + 2, 0xFFFFFF)
+                    graphics.text(font, subtitle, x, curY + 12, 0x8FA0BE)
+                    curY += 28
                 }
             }
+            CategoryTab.MORPH -> {
+                graphics.text(font, "Camouflage Protocol", x, startY + 2, 0xFFFFFF)
+                graphics.text(font, "Level: ${AeonisClientSettings.camouflageLevel.description}", x, startY + 12, 0x8FA0BE)
 
-            // Tab-specific clicks
-            val contentY = py + 52
-            val contentH = panelH - 78
-            when (currentTab) {
-                HubTab.SYSTEM -> handleSystemClicks(px + 8, contentY, panelW - 16, contentH, mx, my)
-                HubTab.ARCHIVE -> handleArchiveClicks(px + 8, contentY, panelW - 16, contentH, mx, my)
-                HubTab.MORPH -> handleMorphClicks(px + 8, contentY, panelW - 16, contentH, mx, my)
-                HubTab.ACTIONS -> handleActionsClicks(px + 8, contentY, panelW - 16, contentH, mx, my)
+                graphics.text(font, "Locomotion Details in HUD", x, startY + 30, 0xFFFFFF)
+                graphics.text(font, "Display flight/swimming/leaping traits on banner", x, startY + 40, 0x8FA0BE)
+            }
+            CategoryTab.COMPANION -> {
+                graphics.text(font, "Speech Dialogue Card", x, startY + 2, 0xFFFFFF)
+                graphics.text(font, "Floating HUD card with typewriter revelation", x, startY + 12, 0x8FA0BE)
+
+                graphics.text(font, "Typewriter Audio", x, startY + 30, 0xFFFFFF)
+                graphics.text(font, "Mechanical click sound as companion speaks", x, startY + 40, 0x8FA0BE)
+
+                // Telemetry overview
+                val infoY = startY + 65
+                graphics.fill(x, infoY, x + w, infoY + 60, 0x8010141C.toInt())
+                graphics.text(font, "COMPANION STATUS TELEMETRY", x + 6, infoY + 6, 0x38BDF8)
+                graphics.text(font, "• Profile Sync: Active (<world>/aeonis/companion_profiles.json)", x + 6, infoY + 18, 0xCBD5E1)
+                graphics.text(font, "• Progression Loop: Tree harvest & stone quarry priority", x + 6, infoY + 28, 0xCBD5E1)
+                graphics.text(font, "• Hunting Governor: 3-animal limit with weapon check", x + 6, infoY + 38, 0xCBD5E1)
+                graphics.text(font, "• Locomotion: Water traversal & 1-wide scaffolding engine", x + 6, infoY + 48, 0xCBD5E1)
+            }
+            CategoryTab.ACTIONS -> {
+                // Actions use full-width buttons with embedded tooltips
+            }
+            CategoryTab.MANUAL -> {
+                val section = AeonisManual.sections.getOrNull(selectedChapter) ?: return
+                val titleText = section.title
+                val tw = font.width(titleText)
+                graphics.text(font, titleText, x + (w - tw) / 2, startY + 4, 0x38BDF8)
+
+                // Word wrap section body
+                val wrappedLines = mutableListOf<String>()
+                section.body.forEach { para ->
+                    wrappedLines += wrapText(para, w)
+                    wrappedLines += ""
+                }
+
+                val linesPerPage = 11
+                val totalPages = maxOf(1, (wrappedLines.size + linesPerPage - 1) / linesPerPage)
+                manualPage = manualPage.coerceIn(0, totalPages - 1)
+
+                val pageStart = manualPage * linesPerPage
+                val pageLines = wrappedLines.drop(pageStart).take(linesPerPage)
+
+                var textY = startY + 22
+                pageLines.forEach { line ->
+                    graphics.text(font, line, x, textY, 0xCBD5E1)
+                    textY += 11
+                }
+
+                val pageInd = "Page ${manualPage + 1} of $totalPages"
+                val pw = font.width(pageInd)
+                graphics.text(font, pageInd, x + (w - pw) / 2, startY + 152, 0x8FA0BE)
             }
         }
-
-        return super.mouseClicked(event, doubleClick)
     }
 
-    private fun handleSystemClicks(x: Int, y: Int, w: Int, h: Int, mx: Int, my: Int): Boolean {
-        val colW = (w - 8) / 2
-        val rowH = 32
-
-        // Card 1: Ability HUD
-        if (mx in x until (x + colW) && my in y until (y + rowH)) {
-            AeonisClientSettings.showAbilityHud = !AeonisClientSettings.showAbilityHud
-            saveAndChime()
-            return true
-        }
-        // Card 2: Cooldown Timers
-        if (mx in (x + colW + 8) until (x + w) && my in y until (y + rowH)) {
-            AeonisClientSettings.showCooldownSeconds = !AeonisClientSettings.showCooldownSeconds
-            saveAndChime()
-            return true
-        }
-        // Card 3: Form Details
-        if (mx in x until (x + colW) && my in (y + rowH + 6) until (y + rowH * 2 + 6)) {
-            AeonisClientSettings.showFormDetails = !AeonisClientSettings.showFormDetails
-            saveAndChime()
-            return true
-        }
-        // Card 4: Input Hints
-        if (mx in (x + colW + 8) until (x + w) && my in (y + rowH + 6) until (y + rowH * 2 + 6)) {
-            AeonisClientSettings.showFormHints = !AeonisClientSettings.showFormHints
-            saveAndChime()
-            return true
-        }
-        // Card 5: Dynamic Camera
-        if (mx in x until (x + colW) && my in (y + (rowH + 6) * 2) until (y + (rowH + 6) * 2 + rowH)) {
-            AeonisClientSettings.largeFormCamera = !AeonisClientSettings.largeFormCamera
-            saveAndChime()
-            return true
-        }
-
-        // Camouflage Selector Chips
-        val camoY = y + (rowH + 6) * 3 + 4
-        val chipW = (w - 24) / 3
-        CamouflageLevel.entries.forEachIndexed { i, level ->
-            val cx = x + 8 + i * (chipW + 4)
-            val cy = camoY + 18
-            if (mx in cx until (cx + chipW) && my in cy until (cy + 18)) {
-                AeonisClientSettings.camouflageLevel = level
-                saveAndChime()
-                return true
-            }
-        }
-
-        return false
-    }
-
-    private fun handleArchiveClicks(x: Int, y: Int, w: Int, h: Int, mx: Int, my: Int): Boolean {
-        val listW = 140
-
-        // Chapter Selection on left
-        val itemH = 16
-        AeonisManual.sections.forEachIndexed { i, _ ->
-            val iy = y + 2 + i * (itemH + 1)
-            if (mx in x until (x + listW) && my in iy until (iy + itemH)) {
-                selectedManualIndex = i
-                manualPage = 0
-                playClick()
-                return true
-            }
-        }
-
-        // Pagination buttons on right
-        val rx = x + listW + 8
-        val rw = w - listW - 8
-        val btnY = y + h - 18
-        if (mx in rx until (rx + 50) && my in btnY until (btnY + 16)) {
-            if (manualPage > 0) {
-                manualPage--
-                playClick()
-                return true
-            }
-        }
-        if (mx in (rx + rw - 50) until (rx + rw) && my in btnY until (btnY + 16)) {
-            manualPage++
-            playClick()
-            return true
-        }
-
-        return false
-    }
-
-    private fun handleMorphClicks(x: Int, y: Int, w: Int, h: Int, mx: Int, my: Int): Boolean {
-        val launchY = y + 90
-        val catW = 180
-        val catH = 22
-        val catX = x + 8
-        val catY = launchY + 44
-        if (mx in catX until (catX + catW) && my in catY until (catY + catH)) {
-            playClick()
-            minecraft?.gui?.setScreen(AeonisFormBrowserScreen(this))
-            return true
-        }
-        return false
-    }
-
-    private fun handleActionsClicks(x: Int, y: Int, w: Int, h: Int, mx: Int, my: Int): Boolean {
-        val actions = listOf(
-            "transform random",
-            "transform info",
-            "transform abilities",
-            "untransform",
-            "aeonis diagnostics"
-        )
-        val itemH = 34
-        actions.forEachIndexed { i, cmd ->
-            val iy = y + i * (itemH + 6)
-            if (mx in x until (x + w) && my in iy until (iy + itemH)) {
-                playClick()
-                minecraft?.player?.connection?.sendCommand(cmd)
-                return true
-            }
-        }
-        return false
-    }
-
-    private fun saveAndChime() {
-        AeonisClientSettings.save()
-        playClick()
-    }
-
-    private fun playClick() {
-        minecraft?.player?.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 0.6f, 1.3f)
-    }
-
-    private fun trimText(text: String, maxWidth: Int): String {
-        if (font.width(text) <= maxWidth) return text
-        var trimmed = text
-        while (trimmed.isNotEmpty() && font.width("$trimmed...") > maxWidth) {
-            trimmed = trimmed.dropLast(1)
-        }
-        return "$trimmed..."
-    }
-
-    private fun wrapParagraph(text: String, maxWidth: Int): List<String> {
+    private fun wrapText(text: String, maxWidth: Int): List<String> {
         val words = text.split(" ")
         val lines = mutableListOf<String>()
         var current = ""
@@ -600,7 +478,8 @@ class AeonisSettingsScreen(private val parent: Screen?) : Screen(Component.liter
 
     override fun onClose() {
         AeonisClientSettings.save()
-        minecraft?.gui?.setScreen(parent)
+        if (minecraft != null && minecraft.gui != null) {
+            minecraft.gui.setScreen(parent)
+        }
     }
 }
-

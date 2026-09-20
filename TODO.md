@@ -562,3 +562,101 @@ none of the companion behaviour in this section has been observed in a running w
 next honest step is a scripted in-game pass: deploy the companion, issue each order in turn,
 and assert on the resulting entity state, because every failure this pass fixed was a
 behavioural bug that a boot test cannot see.
+
+## 11. Companion AI: field-fix pass (real mining, one movement authority, sane hunting)
+
+A second round of live field reports, and what each one actually was.
+
+### "It breaks blocks soo fast" — the mining model was wrong
+
+`CompanionBotEntity.tryBreakBlock` accumulated `breakProgress += 0.25f`, i.e. **four ticks for
+every block in the game**: obsidian, stone and a sapling all came apart in 0.2 seconds. Tool
+speed, hardness and enchantments were never consulted.
+
+`companion/skill/MiningSession.kt` replaces it with the game's own arithmetic —
+`BlockState.getDestroyProgress(player, level, pos)` — evaluated with the chosen tool selected in
+the surrogate's hand. Going through the game's method rather than recomputing
+`speed / hardness / 30` matters: the hand-rolled version would silently omit the
+`MINING_EFFICIENCY` attribute and the dig-speed effect, so an Efficiency V pickaxe would have dug
+exactly as fast as a plain one.
+
+Resulting timings are the vanilla published ones: stone is 8 ticks with an iron pickaxe, 6 with
+diamond, 12 with stone, 23 with wood, and **150 by hand**; oak logs are 8 ticks with a diamond
+axe. Obsidian needs about 188 ticks with a diamond pickaxe and is **refused outright** without
+one, because it would otherwise be 5 000 ticks.
+
+### "It breaks blocks with a random object" — tool choice is now real
+
+Tool selection scores every reachable stack: a flat bonus for being the *correct tool for drops*
+(so a pickaxe always beats a torch, whatever the speeds), then destroy speed weighted, then a
+penalty for tools below 15% durability (a fresh stone pick beats a diamond pick on its last use).
+Items outside the four mining tool families are scored exactly as a bare hand — they may be held,
+they are never *chosen*, which is the direct fix for "mining with a random object". The chosen
+tool is moved into the main hand via a swap, so the player sees the right tool, and durability
+lands on the tool that did the work.
+
+Collection is part of the same operation: a successful break immediately vacuums the drop, so the
+companion never walks away from what it just mined.
+
+A real duplication bug surfaced here too: the old break path wrote the chosen tool into the main
+hand *without* clearing the backpack slot, and the surrogate wrote its hand back into the
+inventory, so one stack lived in two slots. `CompanionInventory.equipFromSlot` is now the only
+supported way to change the held item, and it swaps.
+
+### "It does something with no reason, then comes back and goes again" — two causes
+
+**Cause one: no memory in the skill coordinator.** `CompanionSkillManager` re-decided from
+scratch every tick, so with six skills whose preconditions come and go independently (a log is in
+range, then a drop appears, then the log is nearer again) it changed its mind constantly. Three
+mechanisms now give it memory:
+
+- **Commitment bonus** — the running skill's effective priority is raised by 30 for up to 600
+  ticks, so a started job gets finished.
+- **Dynamic urgency** (`CompanionSkill.urgency`) — a skill can escalate itself when its need is
+  real. Feeding escalates when the owner is starving (60) or hungry with food in the bag (35),
+  which is what lets it beat a committed errand, and nothing else can.
+- **Opportunistic filler** (`CompanionSkill.opportunistic`) — scavenging and book-keeping are
+  considered only after every real job has declined, so they can never interrupt one. Scavenging
+  also became owner-anchored, so chasing a drop can no longer drag the companion away from the
+  player.
+
+Preconditions are now evaluated exactly **once** per skill per tick; several skills keep cooldowns
+or refresh caches inside `canActivate`, and the old code asked twice (once to validate the
+incumbent, once to select), which advanced those counters twice as fast as intended.
+
+**Cause two: two subsystems steering at once.** Skills walk the companion with
+`PathNavigation.moveTo`, while the behaviour tree's `driveMovement` steers `moveControl` along the
+last planned path from the *previous* branch. When a skill took the tick, the stale path was still
+live, so the companion walked one way for the skill and the other way for the tree, then swapped
+back. `MovementOwner` (`NONE`/`SKILL`/`TREE`) makes locomotion a single-owner resource that only
+changes through `claimForSkill()` or `setPath()`, and `driveMovement` refuses to run unless the
+tree owns movement.
+
+### "Hunt is also random" — pets, unreachable prey and target churn
+
+Three fixes in `HuntingFeedingSkill`:
+
+- **Pets are off the menu.** `Wolf`, `Cat` and `Horse` are all `Animal`s, so the companion used to
+  attack the player's tamed pets and any animal they were leading home. Tamed (`TamableAnimal.isTame`)
+  and leashed (`Leashable.isLeashed`) animals are now excluded by identity, not by species, so a
+  wild wolf is still fair game.
+- **Prey must be reachable.** Candidates are filtered through
+  `StratumOcclusionFilter.isTacticallyReachable` — the same test combat uses — so the companion
+  never picks an animal behind a wall or across a ravine and then fails to path to it.
+- **Hunts are anchored on the owner, not the bot.** Selection and the leash both measure from the
+  player, so hunting cannot pull the companion out of sight; if it drifts past 20 blocks it
+  regroups instead of continuing. Scoring is meat-yield per distance (a cow yields two, a chicken
+  one), and a 40-tick pause between kills stops the snap from one carcass to the next.
+
+### Verification for this pass
+
+```
+./gradlew build                        -> BUILD SUCCESSFUL (common + fabric + neoforge)
+python3 scripts/check-mixin-targets.py -> 87 mixin classes, 134 targets resolved, 0 findings
+python3 scripts/mc-smoke-test.py       -> RESULT: PASS - reached the main menu
+```
+
+Still unverified: everything above is behavioural. The mining timings are derived from the game's
+own method, so they cannot be wrong in structure, but nothing has watched the companion dig a real
+block yet. `/comp status` now reports the active job, how long it has held the tick, the last
+hand-off reason and live mining progress, which is the tool for the next in-game pass.

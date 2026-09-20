@@ -6,7 +6,7 @@
     "WindowTitleMixin",
     "PlayerRendererMixin",
     "PlayerCameraPosMixin",
-    "OptionsScreenMixin",
+    "PauseScreenMixin",
     "MultiPlayerGameModeMixin",
     "MobRenderMixin",
     "LocalPlayerMixin",

@@ -17,9 +17,12 @@ import net.minecraft.client.gui.GuiGraphicsExtractor
  * - Dynamic emotion badge ([FOOD], [COMBAT], [GUARD], [TASK]).
  * - Typewriter text revelation that types out messages smoothly.
  */
+import com.qc.aeonis.screen.AeonisClientSettings
+
 object CompanionSpeechOverlay : HudElement {
 
     override fun extractRenderState(graphics: GuiGraphicsExtractor, deltaTracker: DeltaTracker) {
+        if (!AeonisClientSettings.companionSpeechOverlay) return
         val msg = CompanionSpeechState.currentMessage ?: return
         val mc = Minecraft.getInstance()
         val font = mc.font

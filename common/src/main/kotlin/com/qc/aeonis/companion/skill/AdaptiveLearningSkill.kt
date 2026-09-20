@@ -25,6 +25,12 @@ class AdaptiveLearningSkill : CompanionSkill {
     override val category: SkillCategory = SkillCategory.COGNITIVE
     override val priority: Int = 50
 
+    /**
+     * Book-keeping only: it observes and remembers, so it must never take a tick away from work
+     * the player asked for. See [CompanionSkill.opportunistic].
+     */
+    override val opportunistic: Boolean = true
+
     val memory = LearningMemory()
     private var lastLearnTick: Long = 0L
 
