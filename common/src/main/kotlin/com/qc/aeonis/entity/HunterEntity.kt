@@ -1,6 +1,9 @@
 package com.qc.aeonis.entity
 
+import com.qc.aeonis.companion.ai.movement.OnnxMovementController
+import com.qc.aeonis.minigame.manhunt.HunterDifficulty
 import com.qc.aeonis.minigame.manhunt.ManhuntManager
+import com.qc.aeonis.minigame.manhunt.ManhuntPreset
 import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
 import net.minecraft.core.particles.ParticleTypes
@@ -97,6 +100,65 @@ class HunterEntity(
     private var predictionRecordTick = 0
 
     var difficultyMultiplier = 1.0f
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NEURAL MOVEMENT PIPELINE (OnnxMovementController)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    val motorController = OnnxMovementController()
+
+    override fun remove(reason: Entity.RemovalReason) {
+        super.remove(reason)
+        try {
+            motorController.close()
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * Executes neural movement inference using Aeonis's OnnxMovementController pipeline:
+     * - Samples 125-cell local voxel grid around hunter.
+     * - Infers continuous micro-movement and discrete action gates (sprint, jump, sneak).
+     * - Water swimming boost: applies upward buoyant impulse (vy = +0.08) and forward stroke.
+     * - Parkour sprint-jumping and kinetic obstacle avoidance.
+     */
+    fun executeNeuralMovement(targetPos: Vec3, wantedSpeed: Double) {
+        if (level().isClientSide || currentState == HunterState.FROZEN) return
+
+        val rel = targetPos.subtract(position())
+        val voxelGrid = motorController.sampleLocalVoxelGrid(this)
+        val action = motorController.predict(
+            relativeTarget = rel,
+            velocity = deltaMovement,
+            onGround = onGround(),
+            inWater = isInWater,
+            horizontalCollision = horizontalCollision,
+            localVoxelGrid125 = voxelGrid
+        )
+
+        // In-water propulsion (glide across water without drowning or sinking)
+        if (isInWater) {
+            val forwardDir = Vec3(rel.x, 0.0, rel.z).normalize()
+            val swimSpeed = 0.22 * difficultyMultiplier.coerceIn(0.8f, 1.8f)
+            deltaMovement = Vec3(forwardDir.x * swimSpeed, 0.08, forwardDir.z * swimSpeed)
+            syncVelocity = true
+        }
+
+        // Sprinting
+        if (action.sprint || difficultyMultiplier >= 1.15f || currentState == HunterState.RAGING) {
+            isSprinting = true
+        }
+
+        // Sprint-jump / jump mechanics
+        if (action.jump && onGround()) {
+            jumpFromGround()
+        }
+
+        val sprintSpeedFactor = if (isSprinting) 1.25 else 1.0
+        moveControl.setWantedPosition(
+            targetPos.x, targetPos.y, targetPos.z,
+            wantedSpeed * sprintSpeedFactor
+        )
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // BLOCK INTERACTION
@@ -767,6 +829,20 @@ class HunterEntity(
         if (rageModeTimer > 0) damage *= 1.5f
         damage *= difficultyMultiplier
 
+        // Hitman backstab mechanic: 2.5x bonus damage when striking from behind
+        val game = gameId?.let { ManhuntManager.getGame(it) }
+        if (game?.settings?.preset == ManhuntPreset.HITMAN && target is LivingEntity) {
+            val targetLook = target.lookAngle
+            val hunterToTarget = Vec3(target.x - x, 0.0, target.z - z).normalize()
+            val dot = targetLook.dot(hunterToTarget)
+            if (dot > 0.35) {
+                damage *= 2.5f
+                serverLevel.sendParticles(ParticleTypes.CRIT, target.x, target.y + 1.0, target.z, 20, 0.3, 0.3, 0.3, 0.2)
+                serverLevel.playSound(null, target.blockPosition(), SoundEvents.PLAYER_ATTACK_CRIT, SoundSource.PLAYERS, 1.0f, 0.6f)
+                (target as? ServerPlayer)?.sendSystemMessage(Component.literal("§4§l⚠ FATAL BACKSTAB STRIKE!"), true)
+            }
+        }
+
         // Combo system
         val currentTick = serverLevel.gameTime
         if (currentTick - lastAttackTick < 40) {
@@ -946,8 +1022,9 @@ class HunterEntity(
         }
 
         fun getHunterForGame(gameId: String): HunterEntity? {
-            activeHunters[gameId] ?: return null
-            return null
+            val id = activeHunters[gameId] ?: return null
+            val game = ManhuntManager.getGame(gameId) ?: return null
+            return game.level.getEntity(id) as? HunterEntity
         }
 
         fun removeHunterForGame(gameId: String) { activeHunters.remove(gameId) }
@@ -1029,9 +1106,8 @@ private class HunterSmartCombatGoal(private val hunter: HunterEntity) : Goal() {
         val strafeDir = hunter.getStrafeDir()
         val strafe = perp.scale(strafeDir * 0.4).add(toTarget.scale(-0.1))
 
-        hunter.moveControl.setWantedPosition(
-            hunter.x + strafe.x * 3.0, hunter.y, hunter.z + strafe.z * 3.0, 1.1
-        )
+        val wanted = Vec3(hunter.x + strafe.x * 3.0, hunter.y, hunter.z + strafe.z * 3.0)
+        hunter.executeNeuralMovement(wanted, 1.15)
 
         // Attack with crit timing
         if (attackCd <= 0 && dist < 3.0f) {
@@ -1096,6 +1172,7 @@ private class HunterInterceptGoal(private val hunter: HunterEntity) : Goal() {
         } * hunter.difficultyMultiplier
 
         hunter.navigation.moveTo(predicted.x, predicted.y, predicted.z, speed.coerceIn(0.9, 2.0))
+        hunter.executeNeuralMovement(predicted, speed.coerceIn(0.9, 2.0))
 
         // ── Anti-cheese: target towering up → build up ──────────────────
         val heightDiff = target.y - hunter.y
@@ -1154,7 +1231,9 @@ private class HunterChaseGoal(private val hunter: HunterEntity) : Goal() {
         val target = hunter.target ?: return
         if (--pathRecalc <= 0) {
             val speed = if (hunter.currentState == HunterEntity.HunterState.RAGING) 1.5 else 1.2
-            hunter.navigation.moveTo(target, speed * hunter.difficultyMultiplier)
+            val finalSpeed = speed * hunter.difficultyMultiplier
+            hunter.navigation.moveTo(target, finalSpeed)
+            hunter.executeNeuralMovement(target.position(), finalSpeed)
             pathRecalc = 12
         }
     }
