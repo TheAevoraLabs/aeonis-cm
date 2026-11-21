@@ -19,6 +19,7 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.render.TextureSetup;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.renderer.state.gui.GuiElementRenderState;
+import net.minecraft.client.renderer.state.gui.GuiRenderState;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.FormattedCharSequence;
@@ -35,13 +36,35 @@ import org.jspecify.annotations.Nullable;
  */
 public final class SpruceGuiGraphics {
 	private final GuiGraphicsExtractor wrapped;
+	private static java.lang.reflect.Field SCISSOR_FIELD = null;
+	private static java.lang.reflect.Field RENDER_STATE_FIELD = null;
+
+	static {
+		try {
+			for (java.lang.reflect.Field f : GuiGraphicsExtractor.class.getDeclaredFields()) {
+				if (GuiGraphicsExtractor.ScissorStack.class.isAssignableFrom(f.getType())) {
+					f.setAccessible(true);
+					SCISSOR_FIELD = f;
+				} else if (GuiRenderState.class.isAssignableFrom(f.getType())) {
+					f.setAccessible(true);
+					RENDER_STATE_FIELD = f;
+				}
+			}
+		} catch (Throwable ignored) {}
+	}
 
 	public SpruceGuiGraphics(GuiGraphicsExtractor graphics) {
 		this.wrapped = graphics;
 	}
 
 	public static SpruceGuiGraphics of(GuiGraphicsExtractor graphics) {
-		return ((GuiGraphicsAccessor) graphics).spruceui$spruced();
+		if ((Object) graphics instanceof SpruceGuiGraphics spruce) {
+			return spruce;
+		}
+		if (graphics instanceof GuiGraphicsAccessor accessor) {
+			return accessor.spruceui$spruced();
+		}
+		return new SpruceGuiGraphics(graphics);
 	}
 
 	/**
@@ -51,8 +74,28 @@ public final class SpruceGuiGraphics {
 		return this.wrapped;
 	}
 
-	private GuiGraphicsAccessor accessor() {
-		return (GuiGraphicsAccessor) this.wrapped;
+	public GuiGraphicsExtractor.ScissorStack getScissorStack() {
+		if (this.wrapped instanceof GuiGraphicsAccessor accessor) {
+			return accessor.spruceui$getScissorStack();
+		}
+		if (SCISSOR_FIELD != null) {
+			try {
+				return (GuiGraphicsExtractor.ScissorStack) SCISSOR_FIELD.get(this.wrapped);
+			} catch (Throwable ignored) {}
+		}
+		return null;
+	}
+
+	public GuiRenderState getGuiRenderState() {
+		if (this.wrapped instanceof GuiGraphicsAccessor accessor) {
+			return accessor.spruceui$getGuiRenderState();
+		}
+		if (RENDER_STATE_FIELD != null) {
+			try {
+				return (GuiRenderState) RENDER_STATE_FIELD.get(this.wrapped);
+			} catch (Throwable ignored) {}
+		}
+		return null;
 	}
 
 	public int guiWidth() {
@@ -190,6 +233,8 @@ public final class SpruceGuiGraphics {
 			RenderPipeline pipeline, TextureSetup textureSetup, int startX, int startY, int endX, int endY,
 			int colorTopLeft, @Nullable Integer colorTopRight, @Nullable Integer colorBottomRight, @Nullable Integer colorBottomLeft
 	) {
+		var scissor = this.getScissorStack();
+		var bounds = scissor != null ? scissor.peek() : null;
 		this.addGuiElement(
 				new ColoredRectangleRenderState(
 						pipeline, textureSetup, new Matrix3x2f(this.pose()),
@@ -197,7 +242,7 @@ public final class SpruceGuiGraphics {
 						colorTopLeft, colorTopRight != null ? colorTopRight : colorTopLeft,
 						colorBottomRight != null ? colorBottomRight : colorTopLeft,
 						colorBottomLeft != null ? colorBottomLeft : colorTopLeft,
-						this.accessor().spruceui$getScissorStack().peek()
+						bounds
 				)
 		);
 	}
@@ -276,11 +321,16 @@ public final class SpruceGuiGraphics {
 	}
 
 	private ActiveTextCollector.Parameters createDefaultTextParameters(float alpha) {
-		return new ActiveTextCollector.Parameters(new Matrix3x2f(this.wrapped.pose()), alpha, this.accessor().spruceui$getScissorStack().peek());
+		var scissor = this.getScissorStack();
+		var bounds = scissor != null ? scissor.peek() : null;
+		return new ActiveTextCollector.Parameters(new Matrix3x2f(this.wrapped.pose()), alpha, bounds);
 	}
 
 	public void addGuiElement(GuiElementRenderState state) {
-		this.accessor().spruceui$getGuiRenderState().addGuiElement(state);
+		var renderState = this.getGuiRenderState();
+		if (renderState != null) {
+			renderState.addGuiElement(state);
+		}
 	}
 
 	public void requestCursor(CursorType pendingCursor) {
