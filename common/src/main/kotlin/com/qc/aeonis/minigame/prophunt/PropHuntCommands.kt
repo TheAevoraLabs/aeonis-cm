@@ -15,7 +15,12 @@ object PropHuntCommands {
     private val logger = LoggerFactory.getLogger("aeonis-prophunt-commands")
 
     private val CAN_MANAGE = java.util.function.Predicate<CommandSourceStack> { source ->
-        source.server.isSingleplayer || source.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_GAMEMASTER)
+        val s = try { source.server } catch (_: Throwable) { null }
+        if (s == null || s.isSingleplayer) {
+            true
+        } else {
+            source.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_GAMEMASTER)
+        }
     }
 
     fun register(dispatcher: CommandDispatcher<CommandSourceStack>) {
