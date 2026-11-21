@@ -257,23 +257,36 @@ def extract_natives(natives: list[Path], target: Path) -> None:
 def find_mod_jars() -> list[Path]:
     if not FABRIC_LIBS.is_dir():
         raise HarnessError(f"no built jar: {FABRIC_LIBS} does not exist")
-    jars = sorted(
+    # Read mod_version from gradle.properties if available
+    props = REPO_ROOT / "gradle.properties"
+    target_version = None
+    if props.is_file():
+        for line in props.read_text().splitlines():
+            if line.startswith("mod_version="):
+                target_version = line.split("=", 1)[1].strip()
+                break
+    jars = [
         path
         for path in FABRIC_LIBS.glob("*.jar")
         if "sources" not in path.name and "dev" not in path.stem
-    )
+    ]
+    if target_version:
+        matched = [j for j in jars if target_version in j.name]
+        if matched:
+            return matched
     if not jars:
         raise HarnessError(f"no mod jar in {FABRIC_LIBS}")
-    return jars
+    # Fall back to the newest jar by modification time
+    return [max(jars, key=lambda p: p.stat().st_mtime)]
 
 
 def sync_jars(jars: list[Path], mods_dir: Path) -> list[str]:
     """Copy `jars` into the instance mods folder, replacing older builds."""
     mods_dir.mkdir(parents=True, exist_ok=True)
     replaced: list[str] = []
-    stems = {jar.name.rsplit("-", 1)[0] for jar in jars}
     for existing in mods_dir.glob("*.jar"):
-        if existing.name.rsplit("-", 1)[0] in stems:
+        name_lower = existing.name.lower()
+        if name_lower.startswith("aeonis"):
             replaced.append(existing.name)
             existing.unlink()
     for jar in jars:
