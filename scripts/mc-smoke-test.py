@@ -369,14 +369,21 @@ def describe_failure(log_text: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def build_args(info: dict, game_dir: Path, width: int, height: int) -> list[str]:
+def build_args(
+    info: dict,
+    game_dir: Path,
+    width: int,
+    height: int,
+    username: str = "Dev",
+    uuid: str = "00000000000000000000000000000000",
+) -> list[str]:
     return [
-        "--username", "Dev",
+        "--username", username,
         "--version", info["mc_version"],
         "--gameDir", str(game_dir),
         "--assetsDir", str(info["assets_dir"]),
         "--assetIndex", info["asset_index"],
-        "--uuid", "00000000000000000000000000000000",
+        "--uuid", uuid,
         "--accessToken", "0",
         "--userType", "legacy",
         "--versionType", "release",
@@ -397,6 +404,9 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=240.0, help="seconds to wait for a verdict")
     parser.add_argument("--width", type=int, default=854)
     parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--username", default="Dev", help="player username")
+    parser.add_argument("--uuid", default="00000000000000000000000000000000", help="player uuid")
+    parser.add_argument("--game-dir", default=None, help="custom game directory")
     parser.add_argument("--no-build", action="store_true", help="skip ./gradlew :fabric:build")
     parser.add_argument("--no-sync", action="store_true", help="skip copying jars into mods/")
     parser.add_argument("--dry-run", action="store_true", help="print the command and exit")
@@ -406,9 +416,11 @@ def main() -> int:
 
     polymc_home = Path(args.polymc_home).expanduser()
     instance_dir = polymc_home / "instances" / args.instance
-    game_dir = instance_dir / ".minecraft"
-    if not game_dir.is_dir():
-        raise HarnessError(f"instance game directory not found: {game_dir}")
+    default_game_dir = instance_dir / ".minecraft"
+    game_dir = Path(args.game_dir).resolve() if args.game_dir else default_game_dir
+    game_dir.mkdir(parents=True, exist_ok=True)
+    if not default_game_dir.is_dir():
+        raise HarnessError(f"instance game directory not found: {default_game_dir}")
     if not (polymc_home / "meta").is_dir():
         raise HarnessError(f"PolyMC data directory looks wrong: {polymc_home}")
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
@@ -441,7 +453,7 @@ def main() -> int:
 
     if args.dry_run:
         print("\njava -Djava.library.path=<natives> -cp <classpath> "
-              f"{info['main_class']} " + " ".join(build_args(info, game_dir, args.width, args.height)))
+              f"{info['main_class']} " + " ".join(build_args(info, game_dir, args.width, args.height, args.username, args.uuid)))
         return 0
 
     workdir = Path(tempfile.mkdtemp(prefix="aeonis-smoke-"))
@@ -461,7 +473,7 @@ def main() -> int:
         "-cp",
         os.pathsep.join(str(path) for path in classpath),
         info["main_class"],
-        *build_args(info, game_dir, args.width, args.height),
+        *build_args(info, game_dir, args.width, args.height, args.username, args.uuid),
     ]
 
     print(f"launching  : {len(' '.join(command))} char command, log -> {stdout_log}")
