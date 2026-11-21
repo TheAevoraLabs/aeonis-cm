@@ -111,6 +111,30 @@ object AeonisManager : ModInitializer {
 			}
 			true
 		}
+
+		net.fabricmc.fabric.api.event.player.UseItemCallback.EVENT.register { player, _, hand ->
+			if (player is ServerPlayer && PropHuntManager.onPlayerUseItem(player, hand)) {
+				net.minecraft.world.InteractionResult.SUCCESS
+			} else {
+				net.minecraft.world.InteractionResult.PASS
+			}
+		}
+
+		net.fabricmc.fabric.api.event.player.AttackBlockCallback.EVENT.register { player, _, hand, pos, _ ->
+			if (player is ServerPlayer && hand == net.minecraft.world.InteractionHand.MAIN_HAND && PropHuntManager.onPlayerAttackBlock(player, pos)) {
+				net.minecraft.world.InteractionResult.SUCCESS
+			} else {
+				net.minecraft.world.InteractionResult.PASS
+			}
+		}
+
+		net.fabricmc.fabric.api.event.player.AttackEntityCallback.EVENT.register { player, _, hand, entity, _ ->
+			if (player is ServerPlayer && hand == net.minecraft.world.InteractionHand.MAIN_HAND && PropHuntManager.onPlayerAttackEntity(player, entity)) {
+				net.minecraft.world.InteractionResult.SUCCESS
+			} else {
+				net.minecraft.world.InteractionResult.PASS
+			}
+		}
 		
 		EntitySleepEvents.START_SLEEPING.register { entity, sleepingPos ->
 			if (entity is ServerPlayer) {

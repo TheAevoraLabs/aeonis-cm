@@ -72,6 +72,9 @@ class AeonisNeoForge(bus: IEventBus) {
         NeoForge.EVENT_BUS.addListener(::onPlayerLoggedIn)
         NeoForge.EVENT_BUS.addListener(::onPlayerLoggedOut)
         NeoForge.EVENT_BUS.addListener(::onPlayerRespawn)
+        NeoForge.EVENT_BUS.addListener(::onPlayerLeftClickBlock)
+        NeoForge.EVENT_BUS.addListener(::onPlayerRightClickItem)
+        NeoForge.EVENT_BUS.addListener(::onPlayerAttackEntity)
         
         Aeonis.init()
         org.slf4j.LoggerFactory.getLogger("aeonis-neoforge").info("Aeonis NeoForge initialized successfully!")
@@ -217,6 +220,27 @@ class AeonisNeoForge(bus: IEventBus) {
     private fun onPlayerRespawn(event: PlayerEvent.PlayerRespawnEvent) {
         val player = event.entity as? net.minecraft.server.level.ServerPlayer ?: return
         com.qc.aeonis.transform.TransformService.handleRespawn(player)
+    }
+
+    private fun onPlayerLeftClickBlock(event: net.neoforged.neoforge.event.entity.player.PlayerInteractEvent.LeftClickBlock) {
+        val player = event.entity as? ServerPlayer ?: return
+        if (com.qc.aeonis.minigame.prophunt.PropHuntManager.onPlayerAttackBlock(player, event.pos)) {
+            event.isCanceled = true
+        }
+    }
+
+    private fun onPlayerRightClickItem(event: net.neoforged.neoforge.event.entity.player.PlayerInteractEvent.RightClickItem) {
+        val player = event.entity as? ServerPlayer ?: return
+        if (com.qc.aeonis.minigame.prophunt.PropHuntManager.onPlayerUseItem(player, event.hand)) {
+            event.isCanceled = true
+        }
+    }
+
+    private fun onPlayerAttackEntity(event: net.neoforged.neoforge.event.entity.player.AttackEntityEvent) {
+        val player = event.entity as? ServerPlayer ?: return
+        if (com.qc.aeonis.minigame.prophunt.PropHuntManager.onPlayerAttackEntity(player, event.target)) {
+            event.isCanceled = true
+        }
     }
 
     private fun onServerTickPost(event: ServerTickEvent.Post) {
