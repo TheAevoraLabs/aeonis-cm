@@ -34,16 +34,41 @@ import java.util.concurrent.ConcurrentHashMap
  * Unified Sodium-grade Aeonis Hub Screen built with modern SpruceUI tabbed widgets.
  *
  * Provides five full-featured command centers:
- * 1. 🧬 Morph & Camouflage Matrix (Searchable grid, 3D entity previews, ability cooldowns & traits)
- * 2. 🤖 Companion AI Command Center (Live telemetry, hunger, health, tactical orders, skills & grief guard)
- * 3. 🎮 Minigames Arcade (PropHunt arena launcher & Speedrun / Manhunt tracker)
- * 4. ⚙ Mod Settings & Controls (Clean toggles, sliders, dynamic camera, typewriter audio & keybinds)
- * 5. 📖 Field Manual (Official in-game guidebook with chapter index & word-wrapped reader)
+ * 1. [Morph Matrix] (Searchable list, 3D entity previews, ability cooldowns & traits)
+ * 2. [Companion AI] (Live telemetry, health bar, tactical orders, skills & inventory)
+ * 3. [Minigames] (PropHunt arena launcher & Speedrun / Manhunt tracker)
+ * 4. [Settings] (Clean toggles, dynamic camera, typewriter audio & keybinds)
+ * 5. [Manual] (Official in-game guidebook with chapter index & word-wrapped reader)
  *
- * Shared seamlessly across both Fabric and NeoForge.
+ * Styled with a sleek, high-contrast dark slate theme and fully-opaque 32-bit ARGB colors.
  */
 open class AeonisHubScreen(protected val parent: Screen? = null) :
     SpruceScreen(Component.literal("Aeonis Control Hub")) {
+
+    companion object {
+        // Theme Backgrounds
+        const val BG_BASE = 0xF212161F.toInt()          // Deep charcoal dialog base (#12161F)
+        const val BG_HEADER = 0xF8161D29.toInt()        // Polished dark slate header bar (#161D29)
+        const val BG_CARD = 0xD81A2230.toInt()          // Dark card surface (#1A2230)
+        const val BG_CARD_HOVER = 0xFA222C3D.toInt()    // Hover card surface (#222C3D)
+        const val BG_CARD_SELECTED = 0xFA243247.toInt() // Selected list entry surface (#243247)
+
+        // Theme Borders
+        const val BORDER_OUTER = 0xFF1E2638.toInt()     // Outer frame border (#1E2638)
+        const val BORDER_SUBTLE = 0xFF2A3245.toInt()    // Subtle structural borders (#2A3245)
+        const val BORDER_ACCENT = 0xFF3B82F6.toInt()    // Refined blue accent (#3B82F6)
+        const val BORDER_HOVER = 0xFF475569.toInt()     // Hover border (#475569)
+
+        // Typography (All 32-bit ARGB with 0xFF alpha so MC 26.3 GuiGraphics renders them fully visible)
+        const val TEXT_TITLE = 0xFFF8FAFC.toInt()       // High-contrast clean white (#F8FAFC)
+        const val TEXT_SUBTITLE = 0xFF94A3B8.toInt()    // Refined slate secondary (#94A3B8)
+        const val TEXT_BODY = 0xFFCBD5E1.toInt()        // Light slate body text (#CBD5E1)
+        const val TEXT_MUTED = 0xFF64748B.toInt()       // Muted slate (#64748B)
+        const val TEXT_ACCENT = 0xFF60A5FA.toInt()      // Sleek bright blue accent (#60A5FA)
+        const val TEXT_WARN = 0xFFFBBF24.toInt()        // Amber status (#FBBF24)
+        const val TEXT_DANGER = 0xFFF87171.toInt()      // Rose danger (#F87171)
+        const val TEXT_SUCCESS = 0xFF34D399.toInt()     // Emerald success (#34D399)
+    }
 
     private lateinit var tabbedWidget: SpruceTabbedWidget
 
@@ -64,13 +89,14 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         if (selectedMobType == null) {
             selectedMobType = MobCatalogue.possessable().firstOrNull()
         }
+        selectedMobType?.let { updateCachedPreview(it) }
 
         val dialogW = minOf(640, width - 24)
         val dialogH = minOf(360, height - 24)
         val left = (width - dialogW) / 2
         val top = (height - dialogH) / 2
 
-        val sideWidth = 148
+        val sideWidth = 136
 
         // Create SpruceTabbedWidget
         tabbedWidget = SpruceTabbedWidget(
@@ -83,36 +109,36 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
 
         // 1. Morph & Camouflage Matrix Tab
         tabbedWidget.addTabEntry(
-            Component.literal("🧬 Morph Matrix"),
-            Component.literal("Browse forms, 3D entity models & ability matrix"),
+            Component.literal("[Morph Matrix]"),
+            Component.literal("Browse forms, 3D entity models & abilities"),
             { w, h -> buildMorphContainer(w, h) }
         )
 
         // 2. Companion Command Center Tab
         tabbedWidget.addTabEntry(
-            Component.literal("🤖 Companion AI"),
-            Component.literal("Live telemetry, orders, hunger & skills"),
+            Component.literal("[Companion AI]"),
+            Component.literal("Live telemetry, tactical orders & inventory"),
             { w, h -> buildCompanionContainer(w, h) }
         )
 
         // 3. Minigames Arcade Tab
         tabbedWidget.addTabEntry(
-            Component.literal("🎮 Minigames"),
-            Component.literal("PropHunt arena launcher & Manhunt AI setup"),
+            Component.literal("[Minigames]"),
+            Component.literal("PropHunt arcade & Manhunt AI game mode"),
             { w, h -> buildMinigamesContainer(w, h) }
         )
 
         // 4. Mod Settings & Controls Tab
         tabbedWidget.addTabEntry(
-            Component.literal("⚙ Settings"),
-            Component.literal("HUD preferences, visual toggles & shortcuts"),
+            Component.literal("[Settings]"),
+            Component.literal("HUD preferences, visual toggles & camera"),
             { w, h -> buildSettingsContainer(w, h) }
         )
 
         // 5. Field Manual Tab
         tabbedWidget.addTabEntry(
-            Component.literal("📖 Field Manual"),
-            Component.literal("Full in-game documentation & mechanics guide"),
+            Component.literal("[Manual]"),
+            Component.literal("In-game mechanics documentation & guide"),
             { w, h -> buildManualContainer(w, h) }
         )
 
@@ -123,17 +149,17 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         addRenderableWidget(
             SpruceButtonWidget(
                 Position.of(left + dialogW - 100, footerY),
-                98, 20,
+                96, 20,
                 CommonComponents.GUI_DONE
             ) { onClose() }
         )
 
-        // Quick Possess / Untransform Button in Footer
+        // Quick Untransform Button in Footer
         addRenderableWidget(
             SpruceButtonWidget(
-                Position.of(left + 2, footerY),
-                130, 20,
-                Component.literal("⚡ Quick Untransform")
+                Position.of(left + 4, footerY),
+                120, 20,
+                Component.literal("Untransform")
             ) {
                 runCommand("untransform")
                 onClose()
@@ -146,9 +172,9 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
     // ---------------------------------------------------------------------------------------------
     private fun buildMorphContainer(w: Int, h: Int): AbstractSpruceWidget {
         val container = SpruceContainerWidget(Position.of(0, 0), w, h)
-        val leftColW = 160
-        val rightColX = leftColW + 8
-        val rightColW = w - rightColX
+        val leftColW = 156
+        val rightColX = leftColW + 10
+        val rightColW = w - rightColX - 4
 
         // 1. Search Box
         val searchBox = SpruceTextFieldWidget(
@@ -163,10 +189,10 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         val mobList = FormListWidget(
             Position.of(container, 4, 26),
             leftColW - 8, h - 30,
+            isSelected = { type -> selectedMobType == type },
             onSelect = { type ->
                 selectedMobType = type
                 updateCachedPreview(type)
-                tabbedWidget.list.setSelected(tabbedWidget.list.currentTab)
             }
         )
 
@@ -196,64 +222,65 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
                 val x = getX()
                 val y = getY()
 
-                // Header
-                graphics.shadowedText(font, summary.formName, x, y + 2, 0xFFFFFF)
+                // Header & Badges
+                graphics.shadowedText(font, summary.formName, x, y + 2, TEXT_TITLE)
                 val token = MobCatalogue.token(type)
-                graphics.shadowedText(font, "Token: /transform $token", x, y + 14, 0x38BDF8)
-
-                // Locomotion badge
+                graphics.shadowedText(font, "Token: /transform $token", x, y + 14, TEXT_ACCENT)
                 val movementDesc = "Locomotion: ${summary.movement}"
-                graphics.shadowedText(font, movementDesc, x, y + 26, 0xE2C86A)
+                graphics.shadowedText(font, movementDesc, x, y + 26, TEXT_WARN)
 
                 // 3D Entity Preview Box
-                val previewX = x + width - 100
-                val previewY = y + 8
-                val previewW = 92
+                val previewW = 100
                 val previewH = 110
+                val previewX = x + width - previewW
+                val previewY = y + 2
 
                 // Slate frame for 3D model
-                graphics.fill(previewX, previewY, previewX + previewW, previewY + previewH, 0x80141C2B.toInt())
-                graphics.fill(previewX, previewY, previewX + previewW, previewY + 1, 0xFF38BDF8.toInt())
-                graphics.fill(previewX, previewY + previewH - 1, previewX + previewW, previewY + previewH, 0xFF38BDF8.toInt())
-                graphics.fill(previewX, previewY, previewX + 1, previewY + previewH, 0xFF38BDF8.toInt())
-                graphics.fill(previewX + previewW - 1, previewY, previewX + previewW, previewY + previewH, 0xFF38BDF8.toInt())
+                graphics.fill(previewX, previewY, previewX + previewW, previewY + previewH, BG_CARD)
+                graphics.fill(previewX, previewY, previewX + previewW, previewY + 1, BORDER_SUBTLE)
+                graphics.fill(previewX, previewY + previewH - 1, previewX + previewW, previewY + previewH, BORDER_SUBTLE)
+                graphics.fill(previewX, previewY, previewX + 1, previewY + previewH, BORDER_SUBTLE)
+                graphics.fill(previewX + previewW - 1, previewY, previewX + previewW, previewY + previewH, BORDER_SUBTLE)
 
                 val entity = getOrCreatePreviewEntity(type)
                 if (entity != null) {
                     try {
                         val entityH = entity.bbHeight.coerceAtLeast(0.5f)
-                        val scale = (38f / entityH).coerceIn(12f, 48f).toInt()
-                        val cx = previewX + previewW / 2
-                        val cy = previewY + previewH - 12
+                        val scale = (previewH * 0.35f / entityH).coerceIn(12f, 44f).toInt()
                         InventoryScreen.extractEntityInInventoryFollowsMouse(
                             graphics.vanilla(),
                             previewX + 2, previewY + 2, previewX + previewW - 2, previewY + previewH - 2,
                             scale,
-                            0f,
-                            (cx - mouseX).toFloat(),
-                            (cy - 20 - mouseY).toFloat(),
+                            0.0625f,
+                            mouseX.toFloat(),
+                            mouseY.toFloat(),
                             entity
                         )
                     } catch (_: Exception) {
-                        graphics.shadowedText(font, "3D N/A", previewX + 28, previewY + 48, 0x8FA0BE)
+                        val naText = "3D Unavailable"
+                        graphics.shadowedText(font, naText, previewX + (previewW - font.width(naText)) / 2, previewY + previewH / 2 - 4, TEXT_MUTED)
                     }
                 } else {
-                    graphics.shadowedText(font, "3D N/A", previewX + 28, previewY + 48, 0x8FA0BE)
+                    val naText = "No 3D Model"
+                    graphics.shadowedText(font, naText, previewX + (previewW - font.width(naText)) / 2, previewY + previewH / 2 - 4, TEXT_MUTED)
                 }
 
                 // Abilities
+                val maxAbilityTextW = width - previewW - 12
                 var curY = y + 42
-                graphics.shadowedText(font, "Special Abilities:", x, curY, 0x38BDF8)
+                graphics.shadowedText(font, "Special Abilities:", x, curY, TEXT_ACCENT)
                 curY += 12
 
                 if (summary.abilities.isEmpty()) {
-                    graphics.shadowedText(font, "• Passive physical traits only", x, curY, 0x8FA0BE)
+                    graphics.shadowedText(font, "• Passive physical traits only", x, curY, TEXT_MUTED)
                 } else {
                     summary.abilities.forEach { abilityStr ->
-                        val lines = wrapText(abilityStr, width - 110)
+                        val lines = wrapText(abilityStr, maxAbilityTextW)
                         lines.forEach { line ->
-                            graphics.shadowedText(font, line, x, curY, 0xCBD5E1)
-                            curY += 10
+                            if (curY < height - 54) {
+                                graphics.shadowedText(font, line, x, curY, TEXT_BODY)
+                                curY += 10
+                            }
                         }
                     }
                 }
@@ -262,15 +289,16 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         container.addChild(detailWidget)
 
         // 4. Action Buttons below preview
-        val btnY = h - 50
-        val btnW = (rightColW - 12) / 2
+        val btnY = h - 48
+        val btnGap = 6
+        val btnW = (rightColW - btnGap) / 2
 
         // Transform Button
         container.addChild(
             SpruceButtonWidget(
                 Position.of(container, rightColX, btnY),
                 btnW, 20,
-                Component.literal("⚡ Possess Form")
+                Component.literal("Possess Form")
             ) {
                 selectedMobType?.let { type ->
                     runCommand("transform ${MobCatalogue.token(type)}")
@@ -282,9 +310,9 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         // Random Transform Button
         container.addChild(
             SpruceButtonWidget(
-                Position.of(container, rightColX + btnW + 6, btnY),
-                btnW, 20,
-                Component.literal("🎲 Random Form")
+                Position.of(container, rightColX + btnW + btnGap, btnY),
+                rightColW - btnW - btnGap, 20,
+                Component.literal("Random Form")
             ) {
                 runCommand("transform random")
                 onClose()
@@ -295,14 +323,14 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         val camoBtnY = btnY + 24
         val camoButton = SpruceButtonWidget(
             Position.of(container, rightColX, camoBtnY),
-            rightColW - 6, 20,
-            Component.literal("Camouflage Protocol: ${AeonisClientSettings.camouflageLevel.label}")
+            rightColW, 20,
+            Component.literal("Camouflage: ${AeonisClientSettings.camouflageLevel.label}")
         ) { btn ->
             val entries = CamouflageLevel.entries
             val next = (AeonisClientSettings.camouflageLevel.ordinal + 1) % entries.size
             AeonisClientSettings.camouflageLevel = entries[next]
             AeonisClientSettings.save()
-            btn.message = Component.literal("Camouflage Protocol: ${AeonisClientSettings.camouflageLevel.label}")
+            btn.message = Component.literal("Camouflage: ${AeonisClientSettings.camouflageLevel.label}")
         }
         container.addChild(camoButton)
 
@@ -325,12 +353,15 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
             override fun extractWidgetRenderState(graphics: SpruceGuiGraphics, mouseX: Int, mouseY: Int, delta: Float) {
                 val x = getX()
                 val y = getY()
-                // Slate background
-                graphics.fill(x, y, x + width, y + height, 0x90141C2B.toInt())
-                graphics.fill(x, y, x + width, y + 1, 0xFF38BDF8.toInt())
-                graphics.fill(x, y + height - 1, x + width, y + height, 0xFF1E293B.toInt())
 
-                graphics.shadowedText(font, "COMPANION STATUS TELEMETRY", x + 8, y + 6, 0x38BDF8)
+                // Dark card background and subtle border
+                graphics.fill(x, y, x + width, y + height, BG_CARD)
+                graphics.fill(x, y, x + width, y + 1, BORDER_SUBTLE)
+                graphics.fill(x, y + height - 1, x + width, y + height, BORDER_SUBTLE)
+                graphics.fill(x, y, x + 1, y + height, BORDER_SUBTLE)
+                graphics.fill(x + width - 1, y, x + width, y + height, BORDER_SUBTLE)
+
+                graphics.shadowedText(font, "COMPANION STATUS TELEMETRY", x + 8, y + 6, TEXT_ACCENT)
 
                 // Companion Bot live query
                 val bot = getCompanionBot()
@@ -341,20 +372,20 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
                     val heldStacks = (0 until bot.inventory.containerSize).count { !bot.inventory.getItem(it).isEmpty }
 
                     // Health row
-                    graphics.shadowedText(font, "Health: $hp / $maxHp HP", x + 8, y + 20, 0xF87171)
+                    graphics.shadowedText(font, "Health: $hp / $maxHp HP", x + 8, y + 20, TEXT_DANGER)
                     val barW = 120
                     graphics.fill(x + 130, y + 21, x + 130 + barW, y + 27, 0xFF334155.toInt())
                     val hpFill = (barW * (hp.toFloat() / maxHp.coerceAtLeast(1))).toInt().coerceIn(0, barW)
                     graphics.fill(x + 130, y + 21, x + 130 + hpFill, y + 27, 0xFFEF4444.toInt())
 
                     // Standing order & state
-                    graphics.shadowedText(font, "Standing Order: $order", x + 8, y + 36, 0x34D399)
-                    graphics.shadowedText(font, "• Grief Gate: Active  • Autonomous 1-Wide Scaffolding: Ready", x + 8, y + 48, 0x94A3B8)
-                    graphics.shadowedText(font, "• Backpack: Active ($heldStacks stacks held)", x + 8, y + 58, 0x38BDF8)
+                    graphics.shadowedText(font, "Standing Order: $order", x + 8, y + 36, TEXT_SUCCESS)
+                    graphics.shadowedText(font, "• Grief Gate: Active  • Autonomous Scaffolding: Ready", x + 8, y + 48, TEXT_SUBTITLE)
+                    graphics.shadowedText(font, "• Backpack: Active ($heldStacks stacks held)", x + 8, y + 58, TEXT_ACCENT)
                 } else {
-                    graphics.shadowedText(font, "• Companion status: Idle or in unloaded chunk", x + 8, y + 22, 0x94A3B8)
-                    graphics.shadowedText(font, "• Summon with [/comp follow] or use the Tactical Command buttons below", x + 8, y + 36, 0xCBD5E1)
-                    graphics.shadowedText(font, "• Profile Sync: Active (<world>/aeonis/companion_profiles.json)", x + 8, y + 50, 0x38BDF8)
+                    graphics.shadowedText(font, "• Companion status: Idle or in unloaded chunk", x + 8, y + 22, TEXT_SUBTITLE)
+                    graphics.shadowedText(font, "• Summon with [/comp follow] or use the Tactical Command buttons below", x + 8, y + 36, TEXT_TITLE)
+                    graphics.shadowedText(font, "• Profile Sync: Active (<world>/aeonis/companion_profiles.json)", x + 8, y + 50, TEXT_MUTED)
                 }
             }
         }
@@ -365,18 +396,18 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         container.addChild(sep)
 
         val orders = listOf(
-            Triple("🚶 Follow", "comp follow", "Command bot to follow closely"),
-            Triple("🛑 Hold Position", "comp hold", "Hold current spot firmly"),
-            Triple("🛡 Guard Area", "comp guard", "Protect surrounding perimeter"),
-            Triple("🏹 Hunt Food", "comp hunt", "Hunt nearby game animals"),
-            Triple("⚔ Attack Threat", "comp attack", "Target visible hostile entities"),
-            Triple("🌐 Free Autonomy", "comp free", "Restore full autonomous behavior")
+            Triple("Follow", "comp follow", "Command bot to follow closely"),
+            Triple("Hold Position", "comp hold", "Hold current spot firmly"),
+            Triple("Guard Area", "comp guard", "Protect surrounding perimeter"),
+            Triple("Hunt Food", "comp hunt", "Hunt nearby game animals"),
+            Triple("Attack Threat", "comp attack", "Target visible hostile entities"),
+            Triple("Free Autonomy", "comp free", "Restore full autonomous behavior")
         )
 
         val gridCols = 3
         val btnW = (w - 24) / gridCols
         val btnH = 20
-        var curY = 96
+        val curY = 96
 
         orders.forEachIndexed { idx, (label, cmd, _) ->
             val col = idx % gridCols
@@ -396,21 +427,21 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         val utilW = (w - 24) / 3
 
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6, utilY), utilW, 20, Component.literal("⚡ Recall Bot")) {
+            SpruceButtonWidget(Position.of(container, 6, utilY), utilW, 20, Component.literal("Recall Bot")) {
                 runCommand("comp recall")
                 onClose()
             }
         )
 
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6 + utilW + 6, utilY), utilW, 20, Component.literal("📦 Open Backpack")) {
+            SpruceButtonWidget(Position.of(container, 6 + utilW + 6, utilY), utilW, 20, Component.literal("Open Backpack")) {
                 runCommand("comp inventory")
                 onClose()
             }
         )
 
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6 + 2 * (utilW + 6), utilY), utilW, 20, Component.literal("📍 Set Home Anchor")) {
+            SpruceButtonWidget(Position.of(container, 6 + 2 * (utilW + 6), utilY), utilW, 20, Component.literal("Set Home Anchor")) {
                 runCommand("comp home set")
             }
         )
@@ -426,7 +457,7 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         val colW = (w - 18) / 2
 
         // Left Half: PropHunt Launcher
-        val propHeader = SpruceSeparatorWidget(Position.of(container, 6, 4), colW, Component.literal("🎭 PropHunt Arcade"))
+        val propHeader = SpruceSeparatorWidget(Position.of(container, 6, 4), colW, Component.literal("PropHunt Arcade"))
         container.addChild(propHeader)
 
         val propBox = object : AbstractSpruceWidget(Position.of(container, 6, 20)) {
@@ -438,42 +469,47 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
             override fun extractWidgetRenderState(graphics: SpruceGuiGraphics, mouseX: Int, mouseY: Int, delta: Float) {
                 val x = getX()
                 val y = getY()
-                graphics.fill(x, y, x + width, y + height, 0x80141C2B.toInt())
-                graphics.fill(x, y, x + width, y + 1, 0xFF38BDF8.toInt())
+                graphics.fill(x, y, x + width, y + height, BG_CARD)
+                graphics.fill(x, y, x + width, y + 1, BORDER_SUBTLE)
+                graphics.fill(x, y + height - 1, x + width, y + height, BORDER_SUBTLE)
+                graphics.fill(x, y, x + 1, y + height, BORDER_SUBTLE)
+                graphics.fill(x + width - 1, y, x + width, y + height, BORDER_SUBTLE)
 
-                graphics.shadowedText(font, "• Camouflage: Real BlockDisplay / ItemDisplay", x + 6, y + 6, 0xCBD5E1)
-                graphics.shadowedText(font, "• Grid Lock: Sneak or [/prophunt prop lock]", x + 6, y + 18, 0xCBD5E1)
-                graphics.shadowedText(font, "• Sonar Ping: 15-block echolocation radar", x + 6, y + 30, 0xCBD5E1)
-                graphics.shadowedText(font, "• Hunter Penalty: Fatigue on missed blocks", x + 6, y + 42, 0xCBD5E1)
-                graphics.shadowedText(font, "• Taunt Whistle: Audio whistle on cooldown", x + 6, y + 54, 0xCBD5E1)
+                graphics.shadowedText(font, "• Camouflage: Real BlockDisplay / ItemDisplay", x + 6, y + 6, TEXT_SUBTITLE)
+                graphics.shadowedText(font, "• Grid Lock: Sneak or [/prophunt prop lock]", x + 6, y + 18, TEXT_SUBTITLE)
+                graphics.shadowedText(font, "• Sonar Ping: 15-block echolocation radar", x + 6, y + 30, TEXT_SUBTITLE)
+                graphics.shadowedText(font, "• Hunter Penalty: Fatigue on missed blocks", x + 6, y + 42, TEXT_SUBTITLE)
+                graphics.shadowedText(font, "• Taunt Whistle: Audio whistle on cooldown", x + 6, y + 54, TEXT_SUBTITLE)
             }
         }
         container.addChild(propBox)
 
         var propBtnY = 94
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6, propBtnY), colW, 20, Component.literal("▶ Start PropHunt Match")) {
+            SpruceButtonWidget(Position.of(container, 6, propBtnY), colW, 20, Component.literal("Start Match")) {
                 runCommand("prophunt start")
                 onClose()
             }
         )
         propBtnY += 24
+        val halfW = (colW - 6) / 2
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6, propBtnY), (colW - 4) / 2, 20, Component.literal("🔒 Lock Prop")) {
+            SpruceButtonWidget(Position.of(container, 6, propBtnY), halfW, 20, Component.literal("Lock Prop")) {
                 runCommand("prophunt prop lock")
             }
         )
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6 + (colW - 4) / 2 + 4, propBtnY), (colW - 4) / 2, 20, Component.literal("📢 Whistle")) {
+            SpruceButtonWidget(Position.of(container, 6 + halfW + 6, propBtnY), colW - halfW - 6, 20, Component.literal("Taunt Whistle")) {
                 runCommand("prophunt taunt")
             }
         )
 
-        // Right Half: Speedrun / Manhunt Launcher
-        val manhuntHeader = SpruceSeparatorWidget(Position.of(container, 6 + colW + 6, 4), colW, Component.literal("⏱ Speedrun & Manhunt"))
+        // Right Half: Speedrun & Manhunt Launcher
+        val manhuntRightX = 6 + colW + 6
+        val manhuntHeader = SpruceSeparatorWidget(Position.of(container, manhuntRightX, 4), colW, Component.literal("Speedrun & Manhunt"))
         container.addChild(manhuntHeader)
 
-        val manhuntBox = object : AbstractSpruceWidget(Position.of(container, 6 + colW + 6, 20)) {
+        val manhuntBox = object : AbstractSpruceWidget(Position.of(container, manhuntRightX, 20)) {
             init {
                 this.width = colW
                 this.height = 68
@@ -482,33 +518,37 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
             override fun extractWidgetRenderState(graphics: SpruceGuiGraphics, mouseX: Int, mouseY: Int, delta: Float) {
                 val x = getX()
                 val y = getY()
-                graphics.fill(x, y, x + width, y + height, 0x80141C2B.toInt())
-                graphics.fill(x, y, x + width, y + 1, 0xFF38BDF8.toInt())
+                graphics.fill(x, y, x + width, y + height, BG_CARD)
+                graphics.fill(x, y, x + width, y + 1, BORDER_SUBTLE)
+                graphics.fill(x, y + height - 1, x + width, y + height, BORDER_SUBTLE)
+                graphics.fill(x, y, x + 1, y + height, BORDER_SUBTLE)
+                graphics.fill(x + width - 1, y, x + width, y + height, BORDER_SUBTLE)
 
-                graphics.shadowedText(font, "• Multi-Dimensional Smart Compass", x + 6, y + 6, 0xCBD5E1)
-                graphics.shadowedText(font, "• Autonomous Neural Hunter AI Bot", x + 6, y + 18, 0xCBD5E1)
-                graphics.shadowedText(font, "• Nether, Fortress & Stronghold Splits", x + 6, y + 30, 0xCBD5E1)
-                graphics.shadowedText(font, "• Height Delta Trackers & Lodestone Sync", x + 6, y + 42, 0xCBD5E1)
-                graphics.shadowedText(font, "• AI Difficulties: Casual / Tactical / Terminator", x + 6, y + 54, 0xCBD5E1)
+                graphics.shadowedText(font, "• Multi-Dimensional Smart Compass", x + 6, y + 6, TEXT_SUBTITLE)
+                graphics.shadowedText(font, "• Autonomous Neural Hunter AI Bot", x + 6, y + 18, TEXT_SUBTITLE)
+                graphics.shadowedText(font, "• Nether, Fortress & Stronghold Splits", x + 6, y + 30, TEXT_SUBTITLE)
+                graphics.shadowedText(font, "• Height Delta Trackers & Lodestone Sync", x + 6, y + 42, TEXT_SUBTITLE)
+                graphics.shadowedText(font, "• AI Difficulties: Casual / Tactical / Terminator", x + 6, y + 54, TEXT_SUBTITLE)
             }
         }
         container.addChild(manhuntBox)
 
         var manhuntBtnY = 94
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6 + colW + 6, manhuntBtnY), colW, 20, Component.literal("▶ Start Manhunt Game")) {
+            SpruceButtonWidget(Position.of(container, manhuntRightX, manhuntBtnY), colW, 20, Component.literal("Start Game")) {
                 runCommand("manhunt start")
                 onClose()
             }
         )
         manhuntBtnY += 24
+        val mHalfW = (colW - 6) / 2
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6 + colW + 6, manhuntBtnY), (colW - 4) / 2, 20, Component.literal("🧭 Get Compass")) {
+            SpruceButtonWidget(Position.of(container, manhuntRightX, manhuntBtnY), mHalfW, 20, Component.literal("Get Compass")) {
                 runCommand("manhunt compass")
             }
         )
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 6 + colW + 6 + (colW - 4) / 2 + 4, manhuntBtnY), (colW - 4) / 2, 20, Component.literal("🔄 Reset Match")) {
+            SpruceButtonWidget(Position.of(container, manhuntRightX + mHalfW + 6, manhuntBtnY), colW - mHalfW - 6, 20, Component.literal("Reset Match")) {
                 runCommand("manhunt reset")
             }
         )
@@ -532,14 +572,14 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
                 }
 
                 override fun extractWidgetRenderState(graphics: SpruceGuiGraphics, mouseX: Int, mouseY: Int, delta: Float) {
-                    graphics.shadowedText(font, title, getX(), getY() + 2, 0xFFFFFF)
-                    graphics.shadowedText(font, desc, getX(), getY() + 12, 0x8FA0BE)
+                    graphics.shadowedText(font, title, getX(), getY() + 2, TEXT_TITLE)
+                    graphics.shadowedText(font, desc, getX(), getY() + 13, TEXT_SUBTITLE)
                 }
             }
             container.addChild(labelWidget)
 
             val toggle = SpruceToggleSwitch(
-                Position.of(container, w - 54, curY + 2),
+                Position.of(container, w - 58, curY + 2),
                 48, 20,
                 Component.empty(),
                 AbstractSpruceBooleanButtonWidget.PressAction { _, newValue ->
@@ -549,7 +589,7 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
                 initial
             )
             container.addChild(toggle)
-            curY += 26
+            curY += 28
         }
 
         addToggleRow("Ability HUD", "Show hotkeys and form banner while possessing mobs", AeonisClientSettings.showAbilityHud) {
@@ -589,15 +629,17 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         manualChapterIndex = manualChapterIndex.coerceIn(0, (sections.size - 1).coerceAtLeast(0))
         val currentSection = sections.getOrNull(manualChapterIndex)
 
-        // Chapter Selector Dropdown / Buttons
+        // Chapter Selector Button
         val chapterBtn = SpruceButtonWidget(
             Position.of(container, 8, 4),
             w - 16, 20,
             Component.literal("Chapter: ${currentSection?.title ?: "None"}")
-        ) {
-            manualChapterIndex = (manualChapterIndex + 1) % sections.size
-            manualPageIndex = 0
-            tabbedWidget.list.setSelected(tabbedWidget.list.currentTab)
+        ) { btn ->
+            if (sections.isNotEmpty()) {
+                manualChapterIndex = (manualChapterIndex + 1) % sections.size
+                manualPageIndex = 0
+                btn.message = Component.literal("Chapter: ${sections[manualChapterIndex].title}")
+            }
         }
         container.addChild(chapterBtn)
 
@@ -609,13 +651,20 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
             }
 
             override fun extractWidgetRenderState(graphics: SpruceGuiGraphics, mouseX: Int, mouseY: Int, delta: Float) {
-                val sec = currentSection ?: return
+                val sec = sections.getOrNull(manualChapterIndex) ?: return
                 val x = getX()
                 val y = getY()
 
+                // Card background and subtle border
+                graphics.fill(x, y, x + width, y + height, BG_CARD)
+                graphics.fill(x, y, x + width, y + 1, BORDER_SUBTLE)
+                graphics.fill(x, y + height - 1, x + width, y + height, BORDER_SUBTLE)
+                graphics.fill(x, y, x + 1, y + height, BORDER_SUBTLE)
+                graphics.fill(x + width - 1, y, x + width, y + height, BORDER_SUBTLE)
+
                 val allLines = mutableListOf<String>()
                 sec.body.forEach { paragraph ->
-                    allLines.addAll(wrapText(paragraph, width - 8))
+                    allLines.addAll(wrapText(paragraph, width - 16))
                     allLines.add("")
                 }
 
@@ -626,34 +675,32 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
                 val startLine = manualPageIndex * linesPerPage
                 val pageLines = allLines.drop(startLine).take(linesPerPage)
 
-                var textY = y + 4
+                var textY = y + 8
                 pageLines.forEach { line ->
-                    graphics.shadowedText(font, line, x + 4, textY, 0xCBD5E1)
+                    graphics.shadowedText(font, line, x + 8, textY, TEXT_BODY)
                     textY += 12
                 }
 
                 // Page indicator
                 val indicator = "Page ${manualPageIndex + 1} of $totalPages"
-                graphics.shadowedText(font, indicator, x + width / 2 - font.width(indicator) / 2, y + height - 12, 0x38BDF8)
+                graphics.shadowedText(font, indicator, x + (width - font.width(indicator)) / 2, y + height - 12, TEXT_ACCENT)
             }
         }
         container.addChild(textReader)
 
         // Pagination buttons
         val pagerY = h - 24
-        val pagerBtnW = 60
+        val pagerBtnW = 70
         container.addChild(
-            SpruceButtonWidget(Position.of(container, 8, pagerY), pagerBtnW, 20, Component.literal("◀ Prev")) {
+            SpruceButtonWidget(Position.of(container, 8, pagerY), pagerBtnW, 20, Component.literal("< Prev")) {
                 if (manualPageIndex > 0) {
                     manualPageIndex--
-                    tabbedWidget.list.setSelected(tabbedWidget.list.currentTab)
                 }
             }
         )
         container.addChild(
-            SpruceButtonWidget(Position.of(container, w - 8 - pagerBtnW, pagerY), pagerBtnW, 20, Component.literal("Next ▶")) {
+            SpruceButtonWidget(Position.of(container, w - 8 - pagerBtnW, pagerY), pagerBtnW, 20, Component.literal("Next >")) {
                 manualPageIndex++
-                tabbedWidget.list.setSelected(tabbedWidget.list.currentTab)
             }
         )
 
@@ -695,12 +742,13 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
     }
 
     private fun wrapText(text: String, maxWidth: Int): List<String> {
+        val effectiveMaxW = maxWidth.coerceAtLeast(40)
         val words = text.split(" ")
         val lines = mutableListOf<String>()
         var current = ""
         for (w in words) {
             val test = if (current.isEmpty()) w else "$current $w"
-            if (font.width(test) <= maxWidth) {
+            if (font.width(test) <= effectiveMaxW) {
                 current = test
             } else {
                 if (current.isNotEmpty()) lines.add(current)
@@ -726,33 +774,35 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         val top = (height - dialogH) / 2
 
         // Procedural Slate Theme Background
-        graphics.fill(left, top, left + dialogW, top + dialogH, 0xEE10141D.toInt())
+        graphics.fill(left, top, left + dialogW, top + dialogH, BG_BASE)
 
-        // Slate bevel outline
-        graphics.fill(left, top, left + dialogW, top + 1, 0xFF38BDF8.toInt())
-        graphics.fill(left, top, left + 1, top + dialogH, 0xFF38BDF8.toInt())
-        graphics.fill(left, top + dialogH - 1, left + dialogW, top + dialogH, 0xFF0F172A.toInt())
-        graphics.fill(left + dialogW - 1, top, left + dialogW, top + dialogH, 0xFF0F172A.toInt())
+        // Subtle dark slate outer borders
+        graphics.fill(left, top, left + dialogW, top + 1, BORDER_OUTER)
+        graphics.fill(left, top, left + 1, top + dialogH, BORDER_OUTER)
+        graphics.fill(left, top + dialogH - 1, left + dialogW, top + dialogH, BORDER_OUTER)
+        graphics.fill(left + dialogW - 1, top, left + dialogW, top + dialogH, BORDER_OUTER)
 
         // Top Header Banner
-        graphics.fill(left + 1, top + 1, left + dialogW - 1, top + 32, 0xD01E2536.toInt())
-        graphics.fill(left + 1, top + 32, left + dialogW - 1, top + 33, 0xFF38BDF8.toInt())
+        graphics.fill(left + 1, top + 1, left + dialogW - 1, top + 32, BG_HEADER)
+        graphics.fill(left + 1, top + 32, left + dialogW - 1, top + 33, BORDER_SUBTLE)
 
         // Header Title, Version & Authors
-        graphics.shadowedText(font, "AEONIS CONTROL HUB", left + 12, top + 8, 0xFFFFFF)
-        graphics.shadowedText(font, "v5.0 · Minecraft 26.3+ · Dual Loader (SpruceUI)", left + 12, top + 19, 0x38BDF8)
+        graphics.shadowedText(font, "AEONIS CONTROL HUB", left + 12, top + 8, TEXT_TITLE)
+        graphics.shadowedText(font, "v5.0 · Minecraft 26.3 · Dual Loader", left + 12, top + 19, TEXT_ACCENT)
         val creditsText = "by QuantumCreeper & MrMK · Aevora Labs"
         val creditsWidth = font.width(creditsText)
-        graphics.shadowedText(font, creditsText, left + dialogW - creditsWidth - 12, top + 13, 0x94A3B8)
+        graphics.shadowedText(font, creditsText, left + dialogW - creditsWidth - 12, top + 13, TEXT_SUBTITLE)
+
+        // Footer subtle divider
+        val footerY = top + dialogH - 28
+        graphics.fill(left + 1, footerY - 1, left + dialogW - 1, footerY, BORDER_SUBTLE)
 
         super.extractRenderState(graphics, mouseX, mouseY, delta)
     }
 
     override fun onClose() {
         AeonisClientSettings.save()
-        if (minecraft.gui != null) {
-            minecraft.gui.setScreen(parent)
-        }
+        minecraft.gui.setScreen(parent)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -762,6 +812,7 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         position: Position,
         width: Int,
         height: Int,
+        private val isSelected: (EntityType<*>) -> Boolean,
         private val onSelect: (EntityType<*>) -> Unit
     ) : SpruceEntryListWidget<FormListWidget.FormEntry>(position, width, height, 2, FormEntry::class.java) {
 
@@ -778,28 +829,66 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
                     MobCatalogue.token(it).lowercase().contains(query)
             }
             forms.forEach { type ->
-                this.addEntry(FormEntry(type, onSelect))
+                this.addEntry(FormEntry(this, type, { isSelected(type) }, onSelect))
             }
+            this.setScrollAmount(0.0)
+            this.refocusScroll()
         }
 
         class FormEntry(
+            private val list: FormListWidget,
             val type: EntityType<*>,
+            val isSelected: () -> Boolean,
             val onSelect: (EntityType<*>) -> Unit
         ) : SpruceEntryListWidget.Entry() {
 
             init {
-                this.width = 140
-                this.height = 18
+                this.width = list.innerWidth
+                this.height = 24
             }
 
+            override fun getWidth(): Int = list.innerWidth
+
             override fun extractWidgetRenderState(graphics: SpruceGuiGraphics, mouseX: Int, mouseY: Int, delta: Float) {
-                val isHovered = mouseX >= getX() && mouseX <= getX() + width && mouseY >= getY() && mouseY <= getY() + height
-                val bg = if (isHovered) 0x6038BDF8.toInt() else 0x301E293B.toInt()
+                val selected = isSelected()
+                val hovered = mouseX >= getX() && mouseX <= getX() + width && mouseY >= getY() && mouseY <= getY() + height
+                val font = Minecraft.getInstance().font
+
+                // Card background
+                val bg = when {
+                    selected -> BG_CARD_SELECTED
+                    hovered -> BG_CARD_HOVER
+                    else -> 0x50161D29.toInt()
+                }
                 graphics.fill(getX(), getY(), getX() + width, getY() + height, bg)
 
-                val name = type.description.string
-                val color = if (isHovered) 0xFFFFFF else 0xCBD5E1
-                graphics.shadowedText(Minecraft.getInstance().font, name, getX() + 4, getY() + 5, color)
+                // Borders / Highlight bar
+                if (selected) {
+                    graphics.fill(getX(), getY(), getX() + 3, getY() + height, BORDER_ACCENT)
+                    graphics.fill(getX() + 3, getY(), getX() + width, getY() + 1, BORDER_ACCENT)
+                    graphics.fill(getX() + 3, getY() + height - 1, getX() + width, getY() + height, BORDER_ACCENT)
+                    graphics.fill(getX() + width - 1, getY(), getX() + width, getY() + height, BORDER_ACCENT)
+                } else if (hovered) {
+                    graphics.fill(getX(), getY(), getX() + width, getY() + 1, BORDER_HOVER)
+                    graphics.fill(getX(), getY() + height - 1, getX() + width, getY() + height, BORDER_HOVER)
+                    graphics.fill(getX(), getY(), getX() + 1, getY() + height, BORDER_HOVER)
+                    graphics.fill(getX() + width - 1, getY(), getX() + width, getY() + height, BORDER_HOVER)
+                } else {
+                    graphics.fill(getX() + 2, getY() + height - 1, getX() + width - 2, getY() + height, 0x252A3245.toInt())
+                }
+
+                // Entity name & token badge
+                val nameColor = when {
+                    selected -> TEXT_ACCENT
+                    hovered -> TEXT_TITLE
+                    else -> TEXT_BODY
+                }
+                val token = MobCatalogue.token(type)
+                val displayName = type.description.string
+
+                val textX = getX() + if (selected) 7 else 5
+                graphics.shadowedText(font, displayName, textX, getY() + 3, nameColor)
+                graphics.shadowedText(font, token, textX, getY() + 13, TEXT_MUTED)
             }
 
             override fun onMouseClick(event: MouseButtonEvent, doubleClick: Boolean): Boolean {
