@@ -1795,7 +1795,7 @@ object AeonisCommands {
     private fun timeWarp(ctx: CommandContext<CommandSourceStack>): Int {
         val source = ctx.source
         val ticks = IntegerArgumentType.getInteger(ctx, "ticks")
-        source.sendFailure(Component.literal("§e⏰ Time warp is temporarily disabled in the 26.1 migration build."))
+        source.sendFailure(Component.literal("§e⏰ Time warp is temporarily disabled in the 26.3 migration build."))
         return 0
     }
     
@@ -1847,7 +1847,7 @@ object AeonisCommands {
         // Set difficulty to hard
         server.setDifficulty(Difficulty.HARD, true)
         
-        // Time mutation is temporarily disabled in the 26.1 migration build.
+        // Time mutation is temporarily disabled in the 26.3 migration build.
         
         // Give speed II for 20 sec
         player.addEffect(MobEffectInstance(MobEffects.SPEED, 400, 1))

@@ -427,17 +427,38 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
      * decrement is the only consumption that happens; the slot is cleared only once the
      * stack has actually been emptied. Getting this wrong is what previously let the bot
      * place scaffolding without ever spending it.
+     *
+     * ### Grief gate
+     * Every placement in the mod — pillars, bridges, shelter assistance, torches — funnels through
+     * here, so this is where [TerritoryGuard] is consulted: a throwaway scaffold is refused inside
+     * a player's build, nothing is ever placed into the owner's own airspace, and nothing is
+     * dropped on top of a container. A successful placement is recorded in [BuildLedger], which is
+     * what allows the companion to recognise and reclaim its own stair later.
+     *
+     * @param intent whether this is throwaway traversal material or part of a build the player
+     *   asked for, because the two have different rules about the player's territory.
+     * @return true only when a block was actually placed.
      */
-    fun placeFromSlot(pos: BlockPos, slot: Int, face: Direction = Direction.UP, cooldownTicks: Int = blockPlaceCooldownTicks): Boolean {
+    fun placeFromSlot(
+        pos: BlockPos,
+        slot: Int,
+        face: Direction = Direction.UP,
+        cooldownTicks: Int = blockPlaceCooldownTicks,
+        intent: com.qc.aeonis.companion.safety.TerritoryGuard.PlaceIntent =
+            com.qc.aeonis.companion.safety.TerritoryGuard.PlaceIntent.SCAFFOLD
+    ): Boolean {
         if (blockPlaceCooldown > 0 || level().isClientSide) return false
         val serverLevel = level() as? ServerLevel ?: return false
         if (slot < 0 || slot >= CompanionInventory.CONTAINER_SIZE) return false
 
-        val target = serverLevel.getBlockState(pos)
-        if (!target.isAir && !target.canBeReplaced()) return false
-
         val stack = inventory.getItem(slot)
         if (stack.isEmpty) return false
+
+        val verdict = com.qc.aeonis.companion.safety.TerritoryGuard.mayPlace(this, pos, intent)
+        if (!com.qc.aeonis.companion.safety.TerritoryGuard.allows(verdict)) {
+            lastPlacementRefusal = com.qc.aeonis.companion.safety.TerritoryGuard.describe(verdict)
+            return false
+        }
 
         val playerSurrogate = getOrCreateSurrogate() ?: return false
         val success = playerSurrogate.placeBlock(pos, face, stack)
@@ -445,10 +466,30 @@ class CompanionBotEntity(type: EntityType<out CompanionBotEntity>, level: Level)
             if (stack.isEmpty) inventory.setItem(slot, ItemStack.EMPTY)
             inventory.setChanged()
             blockPlaceCooldown = cooldownTicks
+            com.qc.aeonis.companion.safety.BuildLedger.noteBotPlaced(
+                serverLevel,
+                pos,
+                if (intent == com.qc.aeonis.companion.safety.TerritoryGuard.PlaceIntent.SCAFFOLD) {
+                    com.qc.aeonis.companion.safety.BuildLedger.BotPlacementKind.SCAFFOLD
+                } else {
+                    com.qc.aeonis.companion.safety.BuildLedger.BotPlacementKind.PERMANENT
+                }
+            )
+            lastPlacementRefusal = null
             level().playSound(null, pos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 1f, 1f)
         }
         return success
     }
+
+    /**
+     * Why the last placement was refused by the grief gate, or null when it was allowed.
+     *
+     * Kept on the entity rather than returned, because callers of [placeFromSlot] are making a
+     * single decision ("did it work?") and the *reason* is diagnostic — it belongs in
+     * `/comp status` and skill messages, not in every call site's signature.
+     */
+    var lastPlacementRefusal: String? = null
+        private set
 
     /**
      * Advances a real block break at [pos] by one tick, returning true only on the tick the

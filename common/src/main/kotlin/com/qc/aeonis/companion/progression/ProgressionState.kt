@@ -60,11 +60,35 @@ data class ProgressionSnapshot(
     val shelterWorkPending: Boolean = false,
     val ownerFoodLevel: Int = 20
 ) {
-    /** True when the companion has enough wood to stop chopping. */
-    val woodSatisfied: Boolean get() = planks >= WOOD_TARGET_PLANKS && sticks >= WOOD_TARGET_STICKS
+    /**
+     * True when the companion has enough wood to stop chopping.
+     *
+     * ### This predicate used to be unsatisfiable, and that was the resource-wasting loop
+     * It required `planks >= 12 && sticks >= 12` — both *crafted* items. Turning logs into planks
+     * needs a crafting table, and a crafting table needs the player to have made one first, which
+     * is a hard rule of this mod. So for any player who had not yet built a table, the wood rung
+     * could never be satisfied: the companion chopped logs forever, filled its backpack, and never
+     * advanced a rung. Field report: *"its just wasting resources and not at all processing, like
+     * it goes for tree hunt and returns and go return and go"*.
+     *
+     * The rung now measures the resource the rung actually gathers — **logs** — and treats the
+     * crafted forms as an *additional* way to be satisfied. That is the correct shape: a gathering
+     * stage must be satisfiable by gathering, and the planks it needs are the crafting stage's
+     * business, which is gated on the player's table by design.
+     */
+    val woodSatisfied: Boolean get() =
+        logs >= WOOD_TARGET_LOGS || (planks >= WOOD_TARGET_PLANKS && sticks >= WOOD_TARGET_STICKS)
 }
 
-/** Wood targets. Set above the bare minimum so the companion does not stop one plank short. */
+/**
+ * Logs the wood rung gathers before it is satisfied.
+ *
+ * Eight logs is a full stack's worth of planks once the table exists, and small enough that a
+ * companion in a sparse biome still finishes the rung and moves on rather than camping a forest.
+ */
+const val WOOD_TARGET_LOGS: Int = 8
+
+/** Crafted-wood targets, used as the *alternative* satisfaction path. */
 const val WOOD_TARGET_PLANKS: Int = 12
 const val WOOD_TARGET_STICKS: Int = 12
 
@@ -145,7 +169,7 @@ object ProgressionPlanner {
 
     /** Human-readable one-liner for `/comp stats` and the debug log. */
     fun describe(stage: ProgressionStage): String = when (stage) {
-        ProgressionStage.WOOD_GATHERING -> "gathering wood and a first weapon"
+        ProgressionStage.WOOD_GATHERING -> "gathering logs ($WOOD_TARGET_LOGS needed)"
         ProgressionStage.STONE_AGE -> "mining cobblestone and coal"
         ProgressionStage.CRAFTING_SUPPORT -> "crafting tools, torches and food"
         ProgressionStage.SHELTER_CONSTRUCTION -> "helping build shelter"
@@ -175,16 +199,33 @@ class ProgressionStateMachine {
         private set
 
     /**
+     * Ticks the current stage must hold before it may be left for a *lower* rung.
+     *
+     * Without it the ladder can oscillate: gather one log, the count dips, drop a rung, gather
+     * again. The stage may always move *forward* immediately (finishing work is never wrong);
+     * dropping back is what waits.
+     */
+    private var lastUpdateTick: Long = 0L
+    val MIN_STAGE_HOLD_TICKS: Long = 40L
+
+    /**
      * Re-evaluates the stage.
      *
      * @return true when the stage changed this call.
      */
     fun update(snapshot: ProgressionSnapshot, nowTick: Long): Boolean {
         val next = ProgressionPlanner.nextStage(snapshot, stage)
-        if (next == stage) return false
+        if (next == stage) {
+            lastUpdateTick = nowTick
+            return false
+        }
+        // Backwards moves are rate-limited so a fluctuating resource count cannot make the
+        // companion flip between two rungs every second; forwards moves are always allowed.
+        if (next.ordinal < stage.ordinal && nowTick - lastUpdateTick < MIN_STAGE_HOLD_TICKS) return false
         lastTransition = "${stage.name} → ${next.name} @${nowTick}t"
         stage = next
         stageEnteredTick = nowTick
+        lastUpdateTick = nowTick
         transitionCount++
         return true
     }

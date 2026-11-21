@@ -92,7 +92,7 @@ dependencies {
 processResources {
 	inputs.property "version", project.version
 
-	// Disable legacy datapack content that currently fails registry loading on 26.1.
+	// Disable legacy datapack content that currently fails registry loading on 26.3.
 	exclude("data/aeonis/worldgen/**")
 	exclude("data/aeonis/dimension/**")
 	exclude("data/aeonis/dimension_type/**")

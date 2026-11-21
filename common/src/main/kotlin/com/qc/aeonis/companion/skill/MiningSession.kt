@@ -197,6 +197,15 @@ class MiningSession(private val bot: CompanionBotEntity) {
 
         val choice = lockedTool ?: return MiningResult(Phase.REFUSED, "no tool locked in")
 
+        // A player can walk into the dig site mid-dig. The gate was evaluated when the target was
+        // locked in, so it is re-checked cheaply here: the one failure mode worth a per-tick
+        // entity query is pulling the floor out from under somebody who just stepped over it.
+        if (com.qc.aeonis.companion.safety.TerritoryGuard.playerNear(level, pos)) {
+            reset()
+            lastRefusal = "the player stepped into the dig"
+            return MiningResult(Phase.REFUSED, "the player stepped into the dig")
+        }
+
         val perTick = measureProgressPerTick(state, pos, choice)
         if (perTick <= 0f) {
             lastRefusal = "no progress possible"
@@ -230,6 +239,17 @@ class MiningSession(private val bot: CompanionBotEntity) {
         if (state.getDestroySpeed(level, pos) < 0f) {
             lastRefusal = "unbreakable block"
             return MiningResult(Phase.UNBREAKABLE, "unbreakable block")
+        }
+
+        // The grief gate. Every block the companion ever breaks passes through here — obstacle
+        // clearing, tree chopping, ore gathering, tunnelling and reclaiming its own stair — so
+        // this single check is what makes "never mine the player's build" true mod-wide rather
+        // than true in the handful of places someone remembered to ask.
+        val verdict = com.qc.aeonis.companion.safety.TerritoryGuard.mayBreak(bot, pos)
+        if (!com.qc.aeonis.companion.safety.TerritoryGuard.allows(verdict)) {
+            val reason = com.qc.aeonis.companion.safety.TerritoryGuard.describe(verdict)
+            lastRefusal = reason
+            return MiningResult(Phase.REFUSED, reason)
         }
 
         val choice = selectTool(state)
@@ -289,6 +309,9 @@ class MiningSession(private val bot: CompanionBotEntity) {
             return MiningResult(Phase.REFUSED, "could not break the block")
         }
 
+        // The cell is empty now: drop its ownership marks so a later dig in the same spot is not
+        // judged against a block that no longer exists.
+        com.qc.aeonis.companion.safety.BuildLedger.forget(level, pos)
         val collected = bot.scaffoldingEngine.vacuumDrops(DROP_PICKUP_RADIUS)
         val toolName = describeTool(choice)
         reset()

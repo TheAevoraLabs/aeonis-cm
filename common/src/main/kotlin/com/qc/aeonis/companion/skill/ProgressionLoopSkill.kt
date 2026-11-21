@@ -152,6 +152,13 @@ class ProgressionLoopSkill(
      * and collecting the drop afterwards.
      */
     private fun harvest(level: ServerLevel, blockTag: net.minecraft.tags.TagKey<net.minecraft.world.level.block.Block>, label: String): SkillResult {
+        // Stop as soon as the rung's target is met. Without this the loop had no terminal
+        // condition of its own and relied entirely on the stage ladder, so a rung that could not
+        // be satisfied (see [ProgressionSnapshot.woodSatisfied]) gathered forever.
+        if (gatherTargetMet()) {
+            return SkillResult(SkillStatus.SUCCESS, "Enough $label for now", cooldownTicks = 40)
+        }
+
         val target = resolveGatherTarget(level, blockTag)
             ?: return SkillResult(SkillStatus.IDLE, "No $label in range", cooldownTicks = 40)
 
@@ -260,11 +267,16 @@ class ProgressionLoopSkill(
     ): BlockPos? {
         val cached = gatherTarget
         if (cached != null) {
-            if (!level.getBlockState(cached).`is`(tag)) {
-                gatherTarget = null
-            } else {
+            if (level.getBlockState(cached).`is`(tag)) {
                 return cached
             }
+            // The target is gone. Clearing it must also clear the search timestamp, otherwise the
+            // TTL below refuses to look for a replacement until it expires and the skill reports
+            // "nothing to do" for up to two seconds — which the player sees as the companion
+            // giving up mid-errand and starting again. That alternating idle/active cycle was a
+            // large part of the reported "it comes back and goes again for no reason".
+            gatherTarget = null
+            gatherTargetTick = Long.MIN_VALUE
         }
 
         if (gatherTargetTick != Long.MIN_VALUE && now - gatherTargetTick < TARGET_INTERVAL_TICKS) return null
@@ -292,6 +304,20 @@ class ProgressionLoopSkill(
         gatherTarget = best
         ticksOnTarget = 0
         return best
+    }
+
+    /**
+     * True when the current rung already holds enough of what it is gathering.
+     *
+     * Reads from the same snapshot the ladder uses, so the "am I done?" answer and the "which rung
+     * am I on?" answer can never disagree.
+     */
+    private fun gatherTargetMet(): Boolean = when (state.stage) {
+        ProgressionStage.WOOD_GATHERING ->
+            snapshot.logs >= com.qc.aeonis.companion.progression.WOOD_TARGET_LOGS || snapshot.woodSatisfied
+        ProgressionStage.STONE_AGE ->
+            snapshot.cobblestone >= com.qc.aeonis.companion.progression.STONE_TARGET_COBBLESTONE
+        else -> false
     }
 
     /** Human-readable progression state, surfaced by `/comp stats`. */

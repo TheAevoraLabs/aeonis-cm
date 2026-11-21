@@ -12,6 +12,7 @@ base {
 
 loom {
     noIntermediateMappings()
+    accessWidenerPath = file("src/main/resources/aeonis.accesswidener")
 }
 
 dependencies {

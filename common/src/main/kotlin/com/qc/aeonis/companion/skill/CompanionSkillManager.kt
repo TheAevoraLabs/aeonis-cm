@@ -51,6 +51,14 @@ class CompanionSkillManager(val bot: CompanionBotEntity) {
     val autonomousCrafting = AutonomousCraftingSkill(craftingTableUnlock)
     val adaptiveLearning = AdaptiveLearningSkill()
 
+    /**
+     * Packs up the companion's own stairs and bridges when nothing better is on offer.
+     *
+     * One instance for the whole bot, because the cooldown that stops it churning on a single
+     * unreachable block is stateful.
+     */
+    val scaffoldReclaim = ScaffoldReclaimSkill()
+
     /** Every skill, in declaration order; ordering for selection is computed per tick. */
     val registeredSkills: List<CompanionSkill> = listOf(
         huntingFeeding,
@@ -58,7 +66,8 @@ class CompanionSkillManager(val bot: CompanionBotEntity) {
         progressionLoop,
         buildingSupport,
         autonomousCrafting,
-        adaptiveLearning
+        adaptiveLearning,
+        scaffoldReclaim
     )
 
     companion object {

@@ -1,6 +1,6 @@
 package com.qc.aeonis.neoforge.mixin.client;
 
-import com.qc.aeonis.neoforge.screen.AeonisSettingsScreen;
+import com.qc.aeonis.screen.AeonisSettingsScreen;
 import net.minecraft.client.gui.components.SpriteIconButton;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.layouts.LayoutElement;

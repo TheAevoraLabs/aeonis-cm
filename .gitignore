@@ -33,6 +33,7 @@ mappings/
 
 # Tooling
 .freebuff/
+include/
 
 # Data generator cache
 **/src/generated/.cache/
