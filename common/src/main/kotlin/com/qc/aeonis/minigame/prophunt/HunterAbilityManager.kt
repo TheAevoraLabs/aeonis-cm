@@ -1,7 +1,7 @@
 package com.qc.aeonis.minigame.prophunt
 
 import com.qc.aeonis.util.playNotifySound
-
+import net.minecraft.core.BlockPos
 import net.minecraft.core.particles.ParticleTypes
 import net.minecraft.network.chat.Component
 import net.minecraft.server.level.ServerLevel
@@ -12,10 +12,11 @@ import net.minecraft.world.effect.MobEffectInstance
 import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.LivingEntity
-import net.minecraft.world.entity.projectile.throwableitemprojectile.Snowball
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
+import net.minecraft.world.level.ClipContext
 import net.minecraft.world.level.GameType
+import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
 import org.slf4j.LoggerFactory
 import java.util.*
@@ -23,561 +24,467 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.cos
 import kotlin.math.sin
 
-/**
- * ╔════════════════════════════════════════════════════════════════════════════╗
- * ║                      HUNTER ABILITY MANAGER                                ║
- * ║                                                                            ║
- * ║  Manages all hunter-specific abilities and mechanics including:            ║
- * ║  - Tracking tools (scanner, compass, spectral arrow)                       ║
- * ║  - Cooldown-based abilities (dash, pulse)                                  ║
- * ║  - Limited-use gadgets (stun grenades, reveal flares)                      ║
- * ║  - Hunter hints system                                                     ║
- * ║  - False hit penalties                                                     ║
- * ║                                                                            ║
- * ║  Hunters have powerful tools but must use them wisely. False positives     ║
- * ║  (hitting non-prop entities) result in health penalties.                   ║
- * ╚════════════════════════════════════════════════════════════════════════════╝
- */
 object HunterAbilityManager {
     private val logger = LoggerFactory.getLogger("aeonis-prophunt-hunters")
-    
+
+    /** Tracked props for tracker darts */
+    private val trackedProps = ConcurrentHashMap<UUID, UUID>()
+
+    /** Track previous swing state to catch start of left click */
+    private val hunterSwinging = ConcurrentHashMap<UUID, Boolean>()
+
     // ════════════════════════════════════════════════════════════════════════
-    // STATE TRACKING
+    // HUNTER SETUP & RESET
     // ════════════════════════════════════════════════════════════════════════
-    
-    /** Tracks scanner pulse active states */
-    private val activeScanners = ConcurrentHashMap<UUID, Int>()
-    
-    /** Tracks tracker dart targets */
-    private val trackedProps = ConcurrentHashMap<UUID, UUID>() // Hunter -> Tracked Prop
-    
-    /** Tracks stun grenade throws in progress */
-    private val stunGrenadeProjectiles = ConcurrentHashMap<Int, UUID>() // Snowball ID -> Hunter UUID
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // HUNTER SETUP
-    // ════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * Sets up a player as a hunter with appropriate equipment and state.
-     */
+
     fun setupHunter(player: ServerPlayer, game: PropHuntGame) {
         val playerData = game.players[player.uuid] ?: return
-        
-        // Set game mode
+
         player.setGameMode(GameType.ADVENTURE)
-        
-        // Clear and give hunter items
         player.inventory.clearContent()
         giveHunterItems(player, game.settings)
-        
-        // Initialize ability states
+
         playerData.scannerCooldown = 0
         playerData.trackerCooldown = 0
         playerData.stunGrenades = game.settings.stunGrenadesPerRound
-        
-        // Give hunter strength for combat
-        player.addEffect(MobEffectInstance(MobEffects.STRENGTH, Int.MAX_VALUE, 0, false, false, false))
-        
+
         player.sendSystemMessage(Component.literal("§c[PropHunt] §7You are a §c§lHUNTER§7! Find and eliminate all props!"))
     }
-    
-    /**
-     * Gives hunter-specific items to the player.
-     */
+
     private fun giveHunterItems(player: ServerPlayer, settings: PropHuntSettings) {
-        // Slot 0: Hunter's Sword (main weapon)
         val sword = ItemStack(Items.IRON_SWORD)
-        sword.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
-            Component.literal("§c§lHunter's Blade"))
+        sword.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, Component.literal("§c§lHunter's Blade"))
         player.inventory.setItem(0, sword)
-        
-        // Slot 1: Scanner (reveals nearby props)
-        val scanner = ItemStack(Items.ECHO_SHARD)
-        scanner.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
-            Component.literal("§b§lProp Scanner §7(Right-Click)"))
-        player.inventory.setItem(1, scanner)
-        
-        // Slot 2: Tracker Dart (marks a prop through walls)
+
+        val sonar = ItemStack(Items.ECHO_SHARD)
+        sonar.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, Component.literal("§b§lSonar Ping Radar §7(Right-Click)"))
+        player.inventory.setItem(1, sonar)
+
         val tracker = ItemStack(Items.SPECTRAL_ARROW)
-        tracker.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
-            Component.literal("§e§lTracker Dart §7(Right-Click)"))
-        tracker.count = 1
+        tracker.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, Component.literal("§e§lTracker Dart §7(Right-Click)"))
         player.inventory.setItem(2, tracker)
-        
-        // Slot 3: Stun Grenades
+
         val stunGrenades = ItemStack(Items.SNOWBALL)
-        stunGrenades.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
-            Component.literal("§d§lStun Grenade §7(Throw)"))
+        stunGrenades.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, Component.literal("§d§lStun Grenade §7(Throw)"))
         stunGrenades.count = settings.stunGrenadesPerRound
         player.inventory.setItem(3, stunGrenades)
-        
-        // Slot 4: Compass (points to nearest prop when active)
+
         val compass = ItemStack(Items.COMPASS)
-        compass.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
-            Component.literal("§6§lProp Compass"))
+        compass.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, Component.literal("§6§lProp Compass"))
         player.inventory.setItem(4, compass)
-        
-        // Slot 5: Info book
-        val infoBook = ItemStack(Items.WRITTEN_BOOK)
-        infoBook.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
-            Component.literal("§e§lHunter's Guide"))
-        player.inventory.setItem(5, infoBook)
-        
-        // Slot 8: Food for healing
-        val food = ItemStack(Items.COOKED_BEEF)
-        food.count = 16
-        player.inventory.setItem(8, food)
+
+        val beef = ItemStack(Items.COOKED_BEEF)
+        beef.count = 16
+        player.inventory.setItem(8, beef)
     }
-    
-    /**
-     * Resets hunter state at end of round.
-     */
+
     fun resetHunter(player: ServerPlayer) {
-        activeScanners.remove(player.uuid)
         trackedProps.remove(player.uuid)
+        hunterSwinging.remove(player.uuid)
         player.removeEffect(MobEffects.STRENGTH)
         player.removeEffect(MobEffects.BLINDNESS)
-        player.removeEffect(MobEffects.SLOW_FALLING)
+        player.removeEffect(MobEffects.SLOWNESS)
+        player.removeEffect(MobEffects.JUMP_BOOST)
+        player.removeEffect(MobEffects.MINING_FATIGUE)
+        player.removeEffect(MobEffects.WEAKNESS)
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════
-    // HUNTER FREEZE (Start of Round)
+    // HUNTER CAGE & BLINDNESS (Hiding Grace Period)
     // ════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * Freezes or unfreezes a hunter (used during hide phase).
-     */
+
     fun freezeHunter(player: ServerPlayer, freeze: Boolean) {
         val game = PropHuntManager.getPlayerGame(player) ?: return
         val playerData = game.players[player.uuid] ?: return
-        
+
         if (freeze) {
             playerData.isFrozen = true
-            // Complete blindness and immobility
             player.addEffect(MobEffectInstance(MobEffects.BLINDNESS, Int.MAX_VALUE, 0, false, false, false))
             player.addEffect(MobEffectInstance(MobEffects.SLOWNESS, Int.MAX_VALUE, 255, false, false, false))
             player.addEffect(MobEffectInstance(MobEffects.JUMP_BOOST, Int.MAX_VALUE, 128, false, false, false))
-            
-            player.sendSystemMessage(Component.literal("§c[PropHunt] §7You are §cFROZEN§7 and §cBLINDED§7 while props hide!"))
+            player.sendSystemMessage(Component.literal("§c[PropHunt] §7You are §cCAGED§7 while props hide!"))
         } else {
             playerData.isFrozen = false
             player.removeEffect(MobEffects.BLINDNESS)
             player.removeEffect(MobEffects.SLOWNESS)
             player.removeEffect(MobEffects.JUMP_BOOST)
-            
-            player.sendSystemMessage(Component.literal("§a[PropHunt] §7You are §aFREE§7! Hunt them down!"))
-            player.playNotifySound(SoundEvents.ENDER_DRAGON_GROWL, SoundSource.MASTER, 0.5f, 1.5f)
+            // Speed boost on release to charge in!
+            player.addEffect(MobEffectInstance(MobEffects.SPEED, 100, 0, false, false, false))
+            player.sendSystemMessage(Component.literal("§a[PropHunt] §7You are §aRELEASED§7! Hunt them down!"))
+            player.playNotifySound(SoundEvents.RAID_HORN.value(), SoundSource.MASTER, 1.0f, 1.0f)
         }
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════
-    // SCANNER ABILITY
+    // SONAR PING RADAR (Echolocates props within 15 blocks on a timer)
     // ════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * Activates the prop scanner ability.
-     * Sends out a pulse that briefly highlights nearby props.
-     */
+
     fun useScanner(player: ServerPlayer, game: PropHuntGame): Boolean {
+        return useSonarPing(player, game)
+    }
+
+    fun useSonarPing(player: ServerPlayer, game: PropHuntGame): Boolean {
         val playerData = game.players[player.uuid] ?: return false
         val settings = game.settings
-        if (!canUseAbility(player, game, playerData, "scanner")) return false
-        
-        // Check cooldown
+        if (!canUseAbility(player, game, playerData, "sonar ping radar")) return false
+
         if (playerData.scannerCooldown > 0) {
             val secondsLeft = playerData.scannerCooldown / 20
-            player.sendSystemMessage(Component.literal("§c[PropHunt] §7Scanner on cooldown! §e${secondsLeft}s§7 remaining."))
+            player.sendSystemMessage(Component.literal("§c[PropHunt] §7Sonar on cooldown! §e${secondsLeft}s§7 remaining."))
             return false
         }
-        
-        // Set cooldown
+
         playerData.scannerCooldown = settings.scannerCooldownSeconds * 20
-        
-        // Perform scan
-        val level = player.level()
+        val level = player.level() as? ServerLevel ?: return false
         val scanRadius = 15.0
-        
-        // Visual pulse effect
-        spawnScanPulse(player, level, scanRadius)
-        
-        // Find props in range
-        var propsFound = 0
+
+        // Expanding sonic wave particles
+        spawnSonarPulse(player, level, scanRadius)
+        player.playNotifySound(SoundEvents.SCULK_CLICKING, SoundSource.PLAYERS, 1.5f, 1.0f)
+        player.playNotifySound(SoundEvents.BEACON_ACTIVATE, SoundSource.PLAYERS, 0.8f, 2.0f)
+
+        // Echolocate props within 15 blocks
+        var detected = 0
+        var closestDist = Double.MAX_VALUE
+
         for (propData in game.getProps()) {
             if (!propData.isAlive) continue
-            
-            val propPlayer = level.server?.playerList?.getPlayer(propData.uuid) ?: continue
+            val propPlayer = level.server.playerList.getPlayer(propData.uuid) ?: continue
             val distance = player.position().distanceTo(propPlayer.position())
-            
+
             if (distance <= scanRadius) {
-                propsFound++
-                
-                // Give brief glowing effect to prop's disguise entity
-                val disguise = PropDisguiseManager.getDisguiseEntity(propPlayer)
-                if (disguise is LivingEntity) {
-                    disguise.addEffect(MobEffectInstance(MobEffects.GLOWING, 40, 0, false, false, false))
-                }
-                
-                // Direction hint to hunter
-                val direction = getDirectionString(player, propPlayer)
-                player.sendSystemMessage(Component.literal("§b[Scanner] §7Prop detected §e$direction §7(~${distance.toInt()}m)"))
-                
-                // Alert the prop
-                propPlayer.sendSystemMessage(Component.literal("§c[PropHunt] §7A hunter is scanning nearby! Stay still!"))
-                propPlayer.playNotifySound(SoundEvents.GUARDIAN_ATTACK, SoundSource.PLAYERS, 0.3f, 2.0f)
+                detected++
+                if (distance < closestDist) closestDist = distance
+
+                // Closer prop = higher ping pitch
+                val pingPitch = (2.2f - (distance.toFloat() / 15.0f * 1.4f)).coerceIn(0.7f, 2.0f)
+                player.playNotifySound(SoundEvents.NOTE_BLOCK_BELL.value(), SoundSource.PLAYERS, 1.2f, pingPitch)
+
+                // Outline prop disguise with glowing for 2 seconds
+                propPlayer.addEffect(MobEffectInstance(MobEffects.GLOWING, 40, 0, false, false, false))
+
+                val dir = getDirectionString(player, propPlayer)
+                player.sendSystemMessage(Component.literal("§b[Sonar] §aPING! §7Prop detected §e$dir §7(~${String.format("%.1f", distance)}m)"))
+
+                // Alert the echolocated prop with warden heartbeat
+                propPlayer.playNotifySound(SoundEvents.WARDEN_HEARTBEAT, SoundSource.PLAYERS, 1.0f, 1.0f)
+                propPlayer.sendSystemMessage(Component.literal("§c⚠ [Sonar Alert] You were detected by hunter echolocation!"))
             }
         }
-        
-        if (propsFound == 0) {
-            player.sendSystemMessage(Component.literal("§b[Scanner] §7No props detected in range."))
+
+        if (detected == 0) {
+            player.sendSystemMessage(Component.literal("§7[Sonar] No props detected within 15 blocks."))
         } else {
-            player.sendSystemMessage(Component.literal("§b[Scanner] §7Detected §e$propsFound§7 prop(s) nearby!"))
+            player.sendSystemMessage(Component.literal("§b[Sonar] §7Detected §e$detected§7 prop(s) in echolocation range!"))
         }
-        
-        player.playNotifySound(SoundEvents.BEACON_ACTIVATE, SoundSource.PLAYERS, 1.0f, 2.0f)
+
         return true
     }
-    
-    /**
-     * Creates a visual pulse effect for the scanner.
-     */
-    private fun spawnScanPulse(player: ServerPlayer, level: ServerLevel, radius: Double) {
+
+    private fun spawnSonarPulse(player: ServerPlayer, level: ServerLevel, radius: Double) {
         val center = player.position()
-        
-        // Ring of particles expanding outward
         for (ring in 1..3) {
-            val ringRadius = (radius / 3) * ring
-            val particles = (ringRadius * 8).toInt()
-            
+            val ringRadius = (radius / 3.0) * ring
+            val particles = (ringRadius * 6).toInt()
             for (i in 0 until particles) {
                 val angle = (2 * Math.PI / particles) * i
                 val x = center.x + cos(angle) * ringRadius
                 val z = center.z + sin(angle) * ringRadius
-                
-                level.sendParticles(
-                    ParticleTypes.SONIC_BOOM,
-                    x, center.y + 1, z,
-                    1, 0.0, 0.0, 0.0, 0.0
-                )
+
+                level.sendParticles(ParticleTypes.SONIC_BOOM, x, center.y + 0.5, z, 1, 0.0, 0.0, 0.0, 0.0)
+                level.sendParticles(ParticleTypes.SCULK_CHARGE_POP, x, center.y + 0.3, z, 1, 0.0, 0.0, 0.0, 0.0)
             }
         }
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════
     // TRACKER DART
     // ════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * Uses the tracker dart ability.
-     * Marks the nearest prop with a glowing effect visible through walls.
-     */
+
     fun useTracker(player: ServerPlayer, game: PropHuntGame): Boolean {
         val playerData = game.players[player.uuid] ?: return false
         val settings = game.settings
-        if (!canUseAbility(player, game, playerData, "tracker")) return false
-        
-        // Check cooldown
+        if (!canUseAbility(player, game, playerData, "tracker dart")) return false
+
         if (playerData.trackerCooldown > 0) {
-            val secondsLeft = playerData.trackerCooldown / 20
-            player.sendSystemMessage(Component.literal("§c[PropHunt] §7Tracker on cooldown! §e${secondsLeft}s§7 remaining."))
+            val seconds = playerData.trackerCooldown / 20
+            player.sendSystemMessage(Component.literal("§c[PropHunt] §7Tracker cooldown: §e${seconds}s§7 remaining."))
             return false
         }
-        
-        // Find nearest prop
-        val level = player.level()
+
+        val level = player.level() as? ServerLevel ?: return false
         var nearestProp: ServerPlayer? = null
-        var nearestDistance = Double.MAX_VALUE
-        
+        var nearestDist = Double.MAX_VALUE
+
         for (propData in game.getProps()) {
             if (!propData.isAlive) continue
-            val propPlayer = level.server?.playerList?.getPlayer(propData.uuid) ?: continue
-            val distance = player.position().distanceTo(propPlayer.position())
-            
-            if (distance < nearestDistance) {
-                nearestDistance = distance
+            val propPlayer = level.server.playerList.getPlayer(propData.uuid) ?: continue
+            val dist = player.position().distanceTo(propPlayer.position())
+            if (dist < nearestDist) {
+                nearestDist = dist
                 nearestProp = propPlayer
             }
         }
-        
+
         if (nearestProp == null) {
             player.sendSystemMessage(Component.literal("§c[PropHunt] §7No props to track!"))
             return false
         }
-        
-        // Set cooldown
+
         playerData.trackerCooldown = settings.trackerCooldownSeconds * 20
-        
-        // Mark the prop
         trackedProps[player.uuid] = nearestProp.uuid
-        
-        // Apply glowing effect to disguise
-        val disguise = PropDisguiseManager.getDisguiseEntity(nearestProp)
-        if (disguise is LivingEntity) {
-            disguise.addEffect(MobEffectInstance(MobEffects.GLOWING, 200, 0, false, false, false)) // 10 seconds
-        }
-        
-        // Effects
+
+        nearestProp.addEffect(MobEffectInstance(MobEffects.GLOWING, 200, 0, false, false, false))
         player.playNotifySound(SoundEvents.ARROW_HIT_PLAYER, SoundSource.PLAYERS, 1.0f, 0.5f)
-        player.sendSystemMessage(Component.literal("§e[Tracker] §7A prop has been marked! Look for the glow!"))
-        
-        // Alert the prop
-        nearestProp.sendSystemMessage(Component.literal("§c§l⚠ [PropHunt] §cYou have been MARKED by a tracker! You're glowing!"))
+        player.sendSystemMessage(Component.literal("§e[Tracker] §7Nearest prop marked with Glowing for 10s!"))
+
         nearestProp.playNotifySound(SoundEvents.WARDEN_HEARTBEAT, SoundSource.PLAYERS, 1.0f, 1.0f)
-        
+        nearestProp.sendSystemMessage(Component.literal("§c§l⚠ [Tracker Alert] §cYou have been MARKED by a tracker!"))
+
         return true
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════
     // STUN GRENADE
     // ════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * Called when a stun grenade (snowball) lands.
-     * Creates an area stun effect.
-     */
+
     fun onStunGrenadeLand(thrower: ServerPlayer, hitPos: Vec3, game: PropHuntGame) {
-        val level = thrower.level()
+        val level = thrower.level() as? ServerLevel ?: return
         val stunRadius = 5.0
 
-        // Visual effect
-        level.sendParticles(
-            ParticleTypes.EXPLOSION_EMITTER,
-            hitPos.x, hitPos.y + 1, hitPos.z,
-            1, 0.0, 0.0, 0.0, 0.0
-        )
-        level.sendParticles(
-            ParticleTypes.END_ROD,
-            hitPos.x, hitPos.y + 1, hitPos.z,
-            50, stunRadius / 2, 1.0, stunRadius / 2, 0.1
-        )
-        
-        // Sound
-        level.playSound(null, hitPos.x, hitPos.y, hitPos.z,
-            SoundEvents.FIREWORK_ROCKET_BLAST, SoundSource.PLAYERS, 1.5f, 0.5f)
-        
-        // Stun nearby props
+        level.sendParticles(ParticleTypes.EXPLOSION, hitPos.x, hitPos.y + 0.5, hitPos.z, 3, 0.2, 0.2, 0.2, 0.0)
+        level.sendParticles(ParticleTypes.END_ROD, hitPos.x, hitPos.y + 0.5, hitPos.z, 40, stunRadius / 2, 0.8, stunRadius / 2, 0.05)
+        level.playSound(null, hitPos.x, hitPos.y, hitPos.z, SoundEvents.GENERIC_EXPLODE.value(), SoundSource.PLAYERS, 1.0f, 1.2f)
+
         var stunned = 0
         for (propData in game.getProps()) {
             if (!propData.isAlive) continue
-            val propPlayer = level.server?.playerList?.getPlayer(propData.uuid) ?: continue
-            val distance = hitPos.distanceTo(propPlayer.position())
-            
-            if (distance <= stunRadius) {
+            val propPlayer = level.server.playerList.getPlayer(propData.uuid) ?: continue
+            val dist = hitPos.distanceTo(propPlayer.position())
+
+            if (dist <= stunRadius) {
                 stunned++
-                
-                // Apply stun effects
-                propPlayer.addEffect(MobEffectInstance(MobEffects.SLOWNESS, 60, 2, false, false, false))
+                propPlayer.addEffect(MobEffectInstance(MobEffects.SLOWNESS, 80, 2, false, false, false))
                 propPlayer.addEffect(MobEffectInstance(MobEffects.BLINDNESS, 40, 0, false, false, false))
-                
-                // Force unfreeze (reveals them!)
-                if (propData.movementFrozen) {
-                    PropDisguiseManager.toggleFreeze(propPlayer, game)
+
+                // Force unlock
+                val runtime = PropDisguiseManager.getRuntime(propPlayer.uuid)
+                if (runtime != null && runtime.isLocked) {
+                    PropDisguiseManager.toggleGridLock(propPlayer, game, false)
                 }
-                
-                propPlayer.sendSystemMessage(Component.literal("§d§l⚡ [PropHunt] §dYou've been STUNNED!"))
+
+                propPlayer.sendSystemMessage(Component.literal("§d§l⚡ [PropHunt] §dYou were STUNNED and forced out of lock!"))
             }
         }
-        
+
         if (stunned > 0) {
-            thrower.sendSystemMessage(Component.literal("§d[Stun] §7Stunned §e$stunned§7 prop(s)!"))
-            game.broadcast("§d💥 §7A stun grenade was deployed!")
+            thrower.sendSystemMessage(Component.literal("§d[Stun] §7Stunned §e$stunned §7prop(s)!"))
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ANTI-CHEAT MISS PENALTY (Hitting non-prop blocks incurs swing fatigue)
+    // ════════════════════════════════════════════════════════════════════════
+
+    fun onHunterMiss(hunter: ServerPlayer, game: PropHuntGame, isDecoy: Boolean) {
+        val hunterData = game.players[hunter.uuid] ?: return
+        hunterData.falseHits++
+
+        val level = hunter.level() as? ServerLevel ?: return
+
+        // Apply swing fatigue (Mining Fatigue III) & Weakness
+        hunter.addEffect(MobEffectInstance(MobEffects.MINING_FATIGUE, 60, 2, false, false, true))
+        hunter.addEffect(MobEffectInstance(MobEffects.WEAKNESS, 40, 0, false, false, true))
+
+        // Health penalty
+        val penalty = if (isDecoy) game.settings.falseHitPenaltyHealth * 1.5f else game.settings.falseHitPenaltyHealth
+        hunter.hurtServer(level, hunter.damageSources().magic(), penalty)
+
+        // Audio & visual feedback
+        hunter.playNotifySound(SoundEvents.SHIELD_BLOCK, SoundSource.PLAYERS, 1.0f, 0.8f)
+        hunter.playNotifySound(SoundEvents.VILLAGER_NO, SoundSource.PLAYERS, 0.8f, 1.0f)
+        level.sendParticles(ParticleTypes.ANGRY_VILLAGER, hunter.x, hunter.y + 1.2, hunter.z, 6, 0.3, 0.3, 0.3, 0.0)
+
+        if (isDecoy) {
+            hunter.sendSystemMessage(Component.literal("§c§lDECOY HIT! §7You fell for a decoy! Swing fatigue applied. (-${penalty}❤)"))
         } else {
-            thrower.sendSystemMessage(Component.literal("§d[Stun] §7No props caught in the blast."))
+            hunter.sendSystemMessage(Component.literal("§c§lMISS PENALTY! §7Not a prop! Swing fatigue applied. (-${penalty}❤)"))
         }
+
+        game.broadcastToProps("§a[PropHunt] A hunter suffered a miss penalty!")
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════
-    // HINT SYSTEM
+    // ATTACK PROCESSING (Entities & Blocks)
     // ════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * Gives hunters a hint about prop locations.
-     */
-    fun giveHint(game: PropHuntGame) {
-        val aliveProps = game.getProps().filter { it.isAlive }
-        if (aliveProps.isEmpty()) return
-        
-        val level = game.level
-        
-        // Choose a random alive prop
-        val targetProp = aliveProps.random()
-        val propPlayer = level.server?.playerList?.getPlayer(targetProp.uuid) ?: return
-        
-        // Generate a vague hint
-        val hints = listOf(
-            "§e⚡ §7Hint: A prop is hiding near §e${getBiomeName(propPlayer)}§7!",
-            "§e⚡ §7Hint: One prop hasn't moved in a while... suspicious!",
-            "§e⚡ §7Hint: Check around §eY=${propPlayer.blockY}§7 level!",
-            "§e⚡ §7Hint: A prop is approximately §e${getDistanceHint(game, propPlayer)}§7m from the nearest hunter!",
-            "§e⚡ §7Hint: Look for a §e${targetProp.disguiseType?.substringAfterLast(":") ?: "mysterious creature"}§7...",
-            "§e⚡ §7Hint: One prop is facing §e${getCardinalDirection(propPlayer.yRot)}§7!",
-            "§e⚡ §7Hint: Is that §e${targetProp.disguiseType?.substringAfterLast(":")}§7 supposed to be there?"
-        )
-        
-        game.broadcastToHunters(hints.random())
-        
-        // Give props a warning
-        game.broadcastToProps("§c⚠ §7The hunters received a hint about prop locations!")
-    }
-    
-    /**
-     * Gets a readable biome name.
-     */
-    private fun getBiomeName(player: ServerPlayer): String {
-        val biome = player.level().getBiome(player.blockPosition())
-        return biome.unwrapKey().map { it.identifier().path.replace("_", " ") }.orElse("unknown area")
-    }
-    
-    /**
-     * Gets approximate distance hint.
-     */
-    private fun getDistanceHint(game: PropHuntGame, propPlayer: ServerPlayer): Int {
-        var minDistance = Double.MAX_VALUE
-        for (hunterData in game.getHunters()) {
-            val hunter = game.level.server?.playerList?.getPlayer(hunterData.uuid) ?: continue
-            val distance = hunter.position().distanceTo(propPlayer.position())
-            if (distance < minDistance) minDistance = distance
+
+    fun processHunterAttack(hunter: ServerPlayer, target: Entity, game: PropHuntGame): Boolean {
+        val hunterData = game.players[hunter.uuid] ?: return false
+        if (game.state != GameState.SEEKING || hunterData.team != PropHuntTeam.HUNTER || !hunterData.isAlive || hunterData.isFrozen) {
+            return false
         }
-        // Round to nearest 5
-        return ((minDistance / 5).toInt() * 5).coerceIn(5, 100)
-    }
-    
-    /**
-     * Gets cardinal direction from yaw.
-     */
-    private fun getCardinalDirection(yaw: Float): String {
-        val normalized = ((yaw % 360) + 360) % 360
-        return when {
-            normalized < 45 || normalized >= 315 -> "South"
-            normalized < 135 -> "West"
-            normalized < 225 -> "North"
-            else -> "East"
+
+        val level = hunter.level() as? ServerLevel ?: return false
+
+        // Check if target is a prop disguise or solid collision shulker
+        val propUuid = PropDisguiseManager.isPropDisguise(target)
+        if (propUuid != null) {
+            val propPlayer = level.server.playerList.getPlayer(propUuid)
+            if (propPlayer != null) {
+                PropDisguiseManager.onPropCaught(propPlayer, hunter, game)
+                return true
+            }
         }
+
+        // Check if target is a decoy entity
+        val decoyEntry = PropDisguiseManager.isDecoyEntity(target)
+        if (decoyEntry != null) {
+            PropDisguiseManager.detonateDecoy(decoyEntry, level, hunter, game)
+            return true
+        }
+
+        // Friendly fire check between hunters
+        if (target is ServerPlayer) {
+            val targetData = game.players[target.uuid]
+            if (targetData != null && targetData.team == PropHuntTeam.HUNTER) {
+                return false
+            }
+        }
+
+        // Target was an ordinary mob or innocent entity - miss penalty!
+        if (target is LivingEntity) {
+            onHunterMiss(hunter, game, isDecoy = false)
+            return false
+        }
+
+        return false
     }
-    
+
+    fun processHunterBlockHit(hunter: ServerPlayer, pos: BlockPos, game: PropHuntGame): Boolean {
+        val hunterData = game.players[hunter.uuid] ?: return false
+        if (game.state != GameState.SEEKING || hunterData.team != PropHuntTeam.HUNTER || !hunterData.isAlive || hunterData.isFrozen) {
+            return false
+        }
+
+        val level = hunter.level() as? ServerLevel ?: return false
+
+        // Check if any prop is locked at this block
+        for (propData in game.getProps()) {
+            if (!propData.isAlive) continue
+            val runtime = PropDisguiseManager.getRuntime(propData.uuid) ?: continue
+            if (runtime.isLocked && runtime.lockedBlockPos == pos) {
+                val propPlayer = level.server.playerList.getPlayer(propData.uuid)
+                if (propPlayer != null) {
+                    PropDisguiseManager.onPropCaught(propPlayer, hunter, game)
+                    return true
+                }
+            }
+        }
+
+        // Check if any decoy is at this block
+        for (propData in game.getProps()) {
+            val runtime = PropDisguiseManager.getRuntime(propData.uuid) ?: continue
+            val decoy = runtime.activeDecoys.find { it.pos == pos }
+            if (decoy != null) {
+                PropDisguiseManager.detonateDecoy(decoy, level, hunter, game)
+                return true
+            }
+        }
+
+        // Regular non-prop block hit -> Anti-cheat miss penalty!
+        onHunterMiss(hunter, game, isDecoy = false)
+        return false
+    }
+
     // ════════════════════════════════════════════════════════════════════════
-    // TICK HANDLER
+    // TICK LOOP
     // ════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * Called every tick to update hunter state.
-     */
+
     fun tickHunter(player: ServerPlayer, game: PropHuntGame) {
         val playerData = game.players[player.uuid] ?: return
-        
-        // Update cooldowns
+
         if (playerData.scannerCooldown > 0) playerData.scannerCooldown--
         if (playerData.trackerCooldown > 0) playerData.trackerCooldown--
-        
-        // Update compass to point toward nearest prop
-        updateCompass(player, game)
-        
-        // Show actionbar status
+
+        // Left-click swing detection and block raycasting
+        val isSwingingNow = player.isSwinging
+        val wasSwinging = hunterSwinging.getOrDefault(player.uuid, false)
+        hunterSwinging[player.uuid] = isSwingingNow
+
+        if (isSwingingNow && !wasSwinging && game.state == GameState.SEEKING && !playerData.isFrozen) {
+            // Hunter swung their weapon! Perform raycast against blocks
+            val eyePos = player.getEyePosition()
+            val lookVec = player.getViewVector(1.0f)
+            val reach = 4.0
+            val endPos = eyePos.add(lookVec.scale(reach))
+
+            val clipContext = ClipContext(eyePos, endPos, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player)
+            val hitResult = player.level().clip(clipContext)
+
+            if (hitResult.type == HitResult.Type.BLOCK) {
+                processHunterBlockHit(player, hitResult.blockPos, game)
+            }
+        }
+
         showHunterActionBar(player, playerData, game)
     }
-    
-    /**
-     * Updates the compass to point toward the nearest prop.
-     */
-    private fun updateCompass(player: ServerPlayer, game: PropHuntGame) {
-        val level = player.level()
-        
-        // Find nearest alive prop
-        var nearestProp: ServerPlayer? = null
-        var nearestDistance = Double.MAX_VALUE
-        
-        for (propData in game.getProps()) {
-            if (!propData.isAlive) continue
-            val propPlayer = level.server?.playerList?.getPlayer(propData.uuid) ?: continue
-            val distance = player.position().distanceTo(propPlayer.position())
-            if (distance < nearestDistance) {
-                nearestDistance = distance
-                nearestProp = propPlayer
-            }
-        }
-        
-        if (nearestProp != null) {
-            // The compass naturally points to world spawn, but we can give direction hints
-            // Via actionbar since compass lodestone tracking requires block placement
-            // This is handled in the actionbar display
-        }
-    }
-    
-    /**
-     * Shows actionbar information to hunter players.
-     */
+
     private fun showHunterActionBar(player: ServerPlayer, data: PropHuntPlayerData, game: PropHuntGame) {
-        val statusParts = mutableListOf<String>()
-        
-        // Props remaining
-        val propsAlive = game.getProps().count { it.isAlive }
-        statusParts.add("§7Props: §c$propsAlive")
-        
-        // Scanner cooldown
+        val parts = mutableListOf<String>()
+
+        val aliveProps = game.getProps().count { it.isAlive }
+        parts.add("§7Props: §c$aliveProps")
+
         if (data.scannerCooldown > 0) {
-            val seconds = data.scannerCooldown / 20
-            statusParts.add("§b📡 ${seconds}s")
+            parts.add("§b📡 ${data.scannerCooldown / 20}s")
         } else {
-            statusParts.add("§a📡 Ready")
+            parts.add("§a📡 Sonar Ready")
         }
-        
-        // Tracker cooldown
+
         if (data.trackerCooldown > 0) {
-            val seconds = data.trackerCooldown / 20
-            statusParts.add("§e🎯 ${seconds}s")
+            parts.add("§e🎯 ${data.trackerCooldown / 20}s")
         } else {
-            statusParts.add("§a🎯 Ready")
+            parts.add("§a🎯 Dart Ready")
         }
-        
-        // Stun grenades
-        statusParts.add("§d💣 ${data.stunGrenades}")
-        
-        // Nearest prop direction (vague)
-        val nearestProp = findNearestProp(player, game)
-        if (nearestProp != null) {
-            val direction = getDirectionString(player, nearestProp)
-            val distance = player.position().distanceTo(nearestProp.position()).toInt()
-            val distanceColor = when {
-                distance < 10 -> "§c" // Very close - red
-                distance < 25 -> "§e" // Medium - yellow
-                else -> "§7" // Far - gray
+
+        val nearest = findNearestProp(player, game)
+        if (nearest != null) {
+            val dist = player.position().distanceTo(nearest.position()).toInt()
+            val dir = getDirectionString(player, nearest)
+            val color = when {
+                dist < 10 -> "§c"
+                dist < 25 -> "§e"
+                else -> "§7"
             }
-            statusParts.add("$distanceColor↗ $direction")
+            parts.add("$color↗ $dir (~${dist}m)")
         }
-        
-        val message = statusParts.joinToString(" §8| ")
-        player.sendSystemMessage(Component.literal(message))
+
+        player.sendSystemMessage(Component.literal(parts.joinToString(" §8| ")))
     }
-    
-    /**
-     * Finds the nearest alive prop to a hunter.
-     */
+
     private fun findNearestProp(hunter: ServerPlayer, game: PropHuntGame): ServerPlayer? {
-        val level = hunter.level()
+        val level = hunter.level() as? ServerLevel ?: return null
         var nearest: ServerPlayer? = null
-        var nearestDist = Double.MAX_VALUE
-        
+        var minDist = Double.MAX_VALUE
+
         for (propData in game.getProps()) {
             if (!propData.isAlive) continue
-            val prop = level.server?.playerList?.getPlayer(propData.uuid) ?: continue
+            val prop = level.server.playerList.getPlayer(propData.uuid) ?: continue
             val dist = hunter.position().distanceTo(prop.position())
-            if (dist < nearestDist) {
-                nearestDist = dist
+            if (dist < minDist) {
+                minDist = dist
                 nearest = prop
             }
         }
         return nearest
     }
-    
-    /**
-     * Gets a direction string from one player to another.
-     */
+
     private fun getDirectionString(from: ServerPlayer, to: ServerPlayer): String {
         val dx = to.x - from.x
         val dz = to.z - from.z
         val angle = Math.toDegrees(Math.atan2(-dx, dz)).toFloat()
         val relative = ((angle - from.yRot + 360 + 180) % 360) - 180
-        
+
         return when {
             relative > 135 || relative < -135 -> "Behind"
             relative > 45 -> "Right"
@@ -585,65 +492,14 @@ object HunterAbilityManager {
             else -> "Ahead"
         }
     }
-    
-    /**
-     * Shows control tips to a hunter player.
-     */
-    fun showHunterTips(player: ServerPlayer) {
-        player.sendSystemMessage(Component.literal(""))
-        player.sendSystemMessage(Component.literal("§c§l═══════ HUNTER CONTROLS ═══════"))
-        player.sendSystemMessage(Component.literal("§7• §eSword§7 → Attack suspicious entities"))
-        player.sendSystemMessage(Component.literal("§7• §eEcho Shard§7 → Scanner (reveals nearby props)"))
-        player.sendSystemMessage(Component.literal("§7• §eSpectral Arrow§7 → Tracker (marks nearest prop)"))
-        player.sendSystemMessage(Component.literal("§7• §eSnowball§7 → Stun Grenade (freezes props)"))
-        player.sendSystemMessage(Component.literal("§7• §eCompass§7 → Points toward props"))
-        player.sendSystemMessage(Component.literal("§c§l⚠ §7Hitting non-props damages YOU!"))
-        player.sendSystemMessage(Component.literal("§c§l════════════════════════════════"))
-        player.sendSystemMessage(Component.literal(""))
-    }
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // HIT PROCESSING
-    // ════════════════════════════════════════════════════════════════════════
-    
-    /**
-     * Processes a hunter's attack on an entity.
-     * Returns true if it was a valid prop hit.
-     */
-    fun processHunterAttack(hunter: ServerPlayer, target: Entity, game: PropHuntGame): Boolean {
-        val hunterData = game.players[hunter.uuid] ?: return false
-        if (game.state != GameState.SEEKING || hunterData.team != PropHuntTeam.HUNTER || !hunterData.isAlive || hunterData.isFrozen) {
-            return false
-        }
-
-        // Check if target is a disguise entity
-        val propUuid = PropDisguiseManager.isPropDisguise(target)
-        
-        if (propUuid != null) {
-            // It's a prop disguise!
-            val propPlayer = game.level.server?.playerList?.getPlayer(propUuid)
-            if (propPlayer != null) {
-                PropDisguiseManager.onPropCaught(propPlayer, hunter, game)
-                return true
-            }
-        }
-        
-        // Check if it's a regular mob (false positive)
-        if (target is LivingEntity && target !is ServerPlayer) {
-            PropDisguiseManager.onFalseHit(hunter, target, game)
-            return false
-        }
-        
-        return false
-    }
 
     private fun canUseAbility(player: ServerPlayer, game: PropHuntGame, data: PropHuntPlayerData, abilityName: String): Boolean {
         if (game.state != GameState.SEEKING) {
-            player.sendSystemMessage(Component.literal("§c[PropHunt] §7You can only use $abilityName during the seeking phase."))
+            player.sendSystemMessage(Component.literal("§c[PropHunt] §7You can only use $abilityName during seeking phase."))
             return false
         }
         if (data.isFrozen) {
-            player.sendSystemMessage(Component.literal("§c[PropHunt] §7You are frozen and cannot use abilities yet."))
+            player.sendSystemMessage(Component.literal("§c[PropHunt] §7You are caged and cannot use abilities."))
             return false
         }
         if (!data.isAlive) {
