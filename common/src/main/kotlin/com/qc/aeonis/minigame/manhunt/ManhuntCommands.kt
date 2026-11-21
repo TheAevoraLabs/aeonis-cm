@@ -18,6 +18,10 @@ object ManhuntCommands {
     private val logger = LoggerFactory.getLogger("aeonis-manhunt-commands")
     private val pendingSettings = mutableMapOf<java.util.UUID, ManhuntSettings>()
 
+    private val CAN_MANAGE = java.util.function.Predicate<CommandSourceStack> { source ->
+        source.server.isSingleplayer || source.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_GAMEMASTER)
+    }
+
     fun register(dispatcher: CommandDispatcher<CommandSourceStack>) {
         registerCommands(dispatcher)
         logger.info("§a[Manhunt] §7Commands registered!")
@@ -73,7 +77,7 @@ object ManhuntCommands {
                 .then(Commands.literal("leave").executes { leaveGame(it) })
                 .then(Commands.literal("start").executes { startGame(it) })
                 .then(Commands.literal("stop")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .executes { stopGame(it) }
                     .then(Commands.argument("gameId", StringArgumentType.word())
                         .executes { stopSpecificGame(it) }))
@@ -94,7 +98,7 @@ object ManhuntCommands {
                             .executes { setHunterBlocks(it) }))
                     .then(Commands.literal("show").executes { showSettings(it) }))
                 .then(Commands.literal("quickstart")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .executes { quickStart(it) }
                     .then(Commands.argument("players", EntityArgument.players())
                         .executes { quickStartWithPlayers(it) }))
@@ -107,10 +111,10 @@ object ManhuntCommands {
                 .then(Commands.literal("freeze").executes { deactivateHunter(it) })
                 .then(Commands.literal("unfreeze").executes { activateHunter(it) })
                 .then(Commands.literal("teleport")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .executes { teleportHunter(it) })
                 .then(Commands.literal("giveblocks")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .then(Commands.argument("count", IntegerArgumentType.integer(1, 256))
                         .executes { giveHunterBlocks(it) }))
                 .then(Commands.literal("info").executes { showHunterInfo(it) })

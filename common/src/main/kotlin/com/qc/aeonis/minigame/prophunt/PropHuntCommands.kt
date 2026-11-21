@@ -14,6 +14,10 @@ import org.slf4j.LoggerFactory
 object PropHuntCommands {
     private val logger = LoggerFactory.getLogger("aeonis-prophunt-commands")
 
+    private val CAN_MANAGE = java.util.function.Predicate<CommandSourceStack> { source ->
+        source.server.isSingleplayer || source.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_GAMEMASTER)
+    }
+
     fun register(dispatcher: CommandDispatcher<CommandSourceStack>) {
         registerCommands(dispatcher)
         logger.info("§a[PropHunt] §7Commands registered!")
@@ -24,7 +28,7 @@ object PropHuntCommands {
             Commands.literal("prophunt")
                 .then(Commands.literal("help").executes { showHelp(it) })
                 .then(Commands.literal("create")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .then(Commands.argument("arena", StringArgumentType.word())
                         .executes { createGame(it) }))
                 .then(Commands.literal("join")
@@ -46,18 +50,18 @@ object PropHuntCommands {
                     .then(Commands.literal("sonar").executes { useScan(it) })
                     .then(Commands.literal("track").executes { useTracker(it) }))
                 .then(Commands.literal("start")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .executes { forceStart(it) })
                 .then(Commands.literal("stop")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .executes { stopCurrentGame(it) }
                     .then(Commands.argument("arena", StringArgumentType.word())
                         .executes { stopGame(it) }))
                 .then(Commands.literal("skip")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .executes { skipPhase(it) })
                 .then(Commands.literal("arena")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .then(Commands.literal("create")
                         .then(Commands.argument("id", StringArgumentType.word())
                             .executes { createArenaHere(it) }
@@ -77,7 +81,7 @@ object PropHuntCommands {
                         .then(Commands.argument("id", StringArgumentType.word())
                             .executes { teleportToArena(it) })))
                 .then(Commands.literal("settings")
-                    .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                    .requires(CAN_MANAGE)
                     .then(Commands.literal("rounds")
                         .then(Commands.argument("count", IntegerArgumentType.integer(1, 20))
                             .executes { setRounds(it) }))
@@ -111,6 +115,9 @@ object PropHuntCommands {
         ctx.source.sendSuccess({
             Component.literal(
                 "§6§l═══════ PROP HUNT HELP ═══════\n" +
+                "§e/prophunt arena create <arena>§7 - Create arena at current pos\n" +
+                "§e/prophunt create <arena>§7 - Create game in arena\n" +
+                "§e/prophunt start§7 - Start match (auto-creates if none)\n" +
                 "§e/prophunt join <arena>§7 - Join a game\n" +
                 "§e/prophunt leave§7 - Leave your current game\n" +
                 "§e/prophunt list§7 - List active games\n" +
@@ -132,11 +139,13 @@ object PropHuntCommands {
     private fun createGame(ctx: CommandContext<CommandSourceStack>): Int {
         val player = ctx.source.playerOrException
         val arenaId = StringArgumentType.getString(ctx, "arena")
+        // Ensure arena exists, or auto-create it around player
+        ArenaManager.getOrCreateArena(arenaId, ctx.source.level, player.blockPosition())
         val game = PropHuntManager.createGame(arenaId, ctx.source.level, player)
         if (game != null) {
-            ctx.source.sendSuccess({ Component.literal("§a[PropHunt] Game created in arena §e$arenaId§a!") }, false)
+            ctx.source.sendSuccess({ Component.literal("§a[PropHunt] Game created in arena §e$arenaId§a! Type §e/prophunt start §ato begin.") }, false)
         } else {
-            ctx.source.sendFailure(Component.literal("§c[PropHunt] Could not create game in arena $arenaId."))
+            ctx.source.sendFailure(Component.literal("§c[PropHunt] Could not create game (already in a game? Type /prophunt leave)."))
         }
         return 1
     }
@@ -223,9 +232,19 @@ object PropHuntCommands {
     }
 
     private fun forceStart(ctx: CommandContext<CommandSourceStack>): Int {
-        val game = PropHuntManager.getPlayerGame(ctx.source.playerOrException) ?: return 0
+        val player = ctx.source.playerOrException
+        var game = PropHuntManager.getPlayerGame(player)
+        if (game == null) {
+            val arenaId = "arena_1"
+            ArenaManager.getOrCreateArena(arenaId, ctx.source.level, player.blockPosition())
+            game = PropHuntManager.createGame(arenaId, ctx.source.level, player)
+        }
+        if (game == null) {
+            ctx.source.sendFailure(Component.literal("§c[PropHunt] Failed to initialize match."))
+            return 0
+        }
         PropHuntManager.startRound(game)
-        ctx.source.sendSuccess({ Component.literal("§a[PropHunt] Round starting!") }, false)
+        ctx.source.sendSuccess({ Component.literal("§a[PropHunt] Round starting in arena §e${game.arenaId}§a!") }, false)
         return 1
     }
 

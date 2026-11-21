@@ -13,7 +13,9 @@ object ArenaManager {
     fun getArena(id: String): PropHuntArena? = arenas[id]
 
     fun getOrCreateArena(id: String, level: ServerLevel, lobby: BlockPos): PropHuntArena {
-        return arenas.getOrPut(id) { PropHuntArena(id, lobby, BlockPos.ZERO, BlockPos.ZERO) }
+        return arenas.getOrPut(id) {
+            PropHuntArena(id, lobby, lobby.offset(-24, 0, -24), lobby.offset(24, 16, 24))
+        }
     }
 
     fun createArenaFromPreset(id: String, level: ServerLevel, lobby: BlockPos, preset: String) {}
