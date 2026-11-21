@@ -174,12 +174,12 @@ object AeonisManual {
         ),
         ManualSection(
             id = "about",
-            title = "12. About and known limits",
+            title = "12. About and credits",
             body = listOf(
-                "Aeonis 5.0.0 targets Minecraft 26.3 on Fabric and NeoForge from a single shared codebase. The world toggles, the transform system and the ability registry are identical on both loaders.",
-                "The NeoForge build compiles and is wired for parity, but cannot load until KotlinForForge declares 26.3 support. Until then treat the NeoForge jar as a build artifact.",
-                "Some legacy content is still excluded from the build: the Ancard dimension's worldgen and several custom renderers. They are listed in TODO.md with what they need.",
-                "Bug reports are best accompanied by the game log and the exact command you ran. /aeonis diagnostics prints the version, loader and feature state in one block."
+                "Aeonis 5.0 targets Minecraft 26.3 or newer on Fabric and NeoForge from a single shared codebase with unified SpruceUI architecture.",
+                "Developed and maintained by QuantumCreeper & MrMK from Aevora Labs. Licensed under GNU General Public License v3.0 (GPLv3).",
+                "Official Website: https://aeonis.prenxy.app · Source Code & Issues: https://github.com/TheAevoraLabs/aeonis-cm",
+                "/aeonis diagnostics prints the runtime version, loader parity, and feature state in real time."
             )
         )
     )

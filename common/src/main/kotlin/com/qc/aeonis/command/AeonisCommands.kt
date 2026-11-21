@@ -1903,7 +1903,9 @@ object AeonisCommands {
         source.sendSuccess(
             {
                 Component.literal("§6[AEONIS] §7diagnostics")
-                    .append(Component.literal("\n§7  version: §f5.0.0 (Minecraft 26.3)"))
+                    .append(Component.literal("\n§7  version: §f5.0 (Minecraft 26.3+)"))
+                    .append(Component.literal("\n§7  credits: §fQuantumCreeper, MrMK (Aevora Labs)"))
+                    .append(Component.literal("\n§7  license: §fGPL-3.0-or-later"))
                     .append(Component.literal("\n§7  active transform sessions: §f$sessionCount"))
                     .append(Component.literal("\n§7  your form: §f$form"))
                     .append(Component.literal("\n§7  movement: §f$movement"))

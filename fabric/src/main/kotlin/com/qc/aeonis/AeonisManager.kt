@@ -149,7 +149,7 @@ object AeonisManager : ModInitializer {
 			if (!AeonisFeatures.hasShownWorldInstallNotice(server)) {
 				AeonisFeatures.markWorldInstallNoticeShown(server)
 				server.execute {
-					player.sendSystemMessage(Component.literal("§eThanks for installing Aeonis! This build targets Minecraft 26.3. See TODO.md for known gaps."))
+					player.sendSystemMessage(Component.literal("§b✨ Welcome to Aeonis 5.0! §7(MC 26.3+) §8by §fQuantumCreeper §8& §fMrMK §8(Aevora Labs) · GPLv3"))
 				}
 			}
 

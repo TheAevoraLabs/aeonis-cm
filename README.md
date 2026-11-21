@@ -6,9 +6,10 @@ Aeonis adds player and mob transformation, AI-assisted command and control syste
 custom dimensions and progression hooks, unique animated mobs, and supporting
 rendering and utility tooling.
 
-- Version: 5.0.0
-- Minecraft: 26.3
+- Version: 5.0
+- Minecraft: 26.3 or newer (>=26.3)
 - Loaders: Fabric and NeoForge
+- Authors: QuantumCreeper, MrMK (Aevora Labs)
 - License: GPL-3.0-or-later (see [LICENSE](LICENSE))
 
 ## Requirements
@@ -17,11 +18,11 @@ Verified against the official Fabric, NeoForged, and Mojang metadata for the 26.
 
 | Component | Version |
 | --- | --- |
-| Minecraft | 26.3 |
+| Minecraft | 26.3 or newer (>=26.3) |
 | Java | 25 (minimum for both build and runtime) |
 | Gradle | 9.5.1 (via the included wrapper) |
 | Fabric Loader | 0.19.5 or newer |
-| Fabric API | 0.161.0+26.3 |
+| Fabric API | 0.166.0+26.3 |
 | Fabric Language Kotlin | 1.14.1+kotlin.2.4.20 |
 | Fabric Loom | 1.17-SNAPSHOT |
 | NeoForge | 26.3.0.6-beta |
@@ -283,7 +284,8 @@ the right sequence for the next version bump.
 
 Changelog entries live in [CHANGELOG.md](CHANGELOG.md).
 
-## License
+## License & Credits
 
-Aeonis is licensed under the GNU General Public License v3.0 or later.
-Copyright (C) 2025-2026 Aevora Labs. See [LICENSE](LICENSE).
+Aeonis is licensed under the GNU General Public License v3.0 or later (GPLv3).  
+Developed and maintained by **QuantumCreeper** and **MrMK** from **Aevora Labs**.  
+Copyright (C) 2025-2026 QuantumCreeper, MrMK (Aevora Labs). See [LICENSE](LICENSE).

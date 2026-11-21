@@ -738,9 +738,12 @@ open class AeonisHubScreen(protected val parent: Screen? = null) :
         graphics.fill(left + 1, top + 1, left + dialogW - 1, top + 32, 0xD01E2536.toInt())
         graphics.fill(left + 1, top + 32, left + dialogW - 1, top + 33, 0xFF38BDF8.toInt())
 
-        // Header Title & Version
-        graphics.shadowedText(font, "AEONIS UNIFIED CONTROL HUB", left + 12, top + 8, 0xFFFFFF)
-        graphics.shadowedText(font, "v5.0.0 · Dual Loader Unified Interface (SpruceUI)", left + 12, top + 19, 0x38BDF8)
+        // Header Title, Version & Authors
+        graphics.shadowedText(font, "AEONIS CONTROL HUB", left + 12, top + 8, 0xFFFFFF)
+        graphics.shadowedText(font, "v5.0 · Minecraft 26.3+ · Dual Loader (SpruceUI)", left + 12, top + 19, 0x38BDF8)
+        val creditsText = "by QuantumCreeper & MrMK · Aevora Labs"
+        val creditsWidth = font.width(creditsText)
+        graphics.shadowedText(font, creditsText, left + dialogW - creditsWidth - 12, top + 13, 0x94A3B8)
 
         super.extractRenderState(graphics, mouseX, mouseY, delta)
     }

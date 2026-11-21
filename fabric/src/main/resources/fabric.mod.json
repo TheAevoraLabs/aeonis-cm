@@ -5,6 +5,8 @@
 	"name": "Aeonis",
 	"description": "Aeonis is a gameplay and world-content mod for Minecraft, available for both Fabric and NeoForge. It provides player and mob transformation, AI-assisted command and control systems, custom dimensions and progression hooks, unique animated mobs, and supporting rendering and utility tooling.",
 	"authors": [
+		"QuantumCreeper",
+		"MrMK",
 		"Aevora Labs"
 	],
 	"contact": {
@@ -62,7 +64,7 @@
 	],
 	"depends": {
 		"fabricloader": ">=0.19.5",
-		"minecraft": ">=26.3 <26.4",
+		"minecraft": ">=26.3",
 		"java": ">=25",
 		"fabric-api": "*",
 		"fabric-language-kotlin": "*"

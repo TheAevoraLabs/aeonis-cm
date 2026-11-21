@@ -1,5 +1,5 @@
 # NeoForge mod metadata for Aeonis.
-# Copyright (C) 2025-2026 Aevora Labs -- SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 QuantumCreeper, MrMK (Aevora Labs) -- SPDX-License-Identifier: GPL-3.0-or-later
 
 license="${mod_license}"
 issueTrackerURL="https://github.com/TheAevoraLabs/aeonis-cm/issues"
@@ -15,8 +15,8 @@ version="${mod_version}"
 displayName="${mod_name}"
 displayURL="https://aeonis.prenxy.app"
 logoFile="assets/aeonis-manager/icon.png"
-authors="Aevora Labs"
-credits="Aevora Labs"
+authors="${mod_authors}"
+credits="QuantumCreeper, MrMK, Aevora Labs"
 description='''
 Aeonis is a gameplay and world-content mod for Minecraft, available for both Fabric and NeoForge. It provides player and mob transformation, AI-assisted command and control systems, custom dimensions and progression hooks, unique animated mobs, and supporting rendering and utility tooling.
 '''
