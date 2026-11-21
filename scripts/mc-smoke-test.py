@@ -388,6 +388,7 @@ def main() -> int:
     parser.add_argument("--no-sync", action="store_true", help="skip copying jars into mods/")
     parser.add_argument("--dry-run", action="store_true", help="print the command and exit")
     parser.add_argument("--verbose", action="store_true", help="echo the game log as it arrives")
+    parser.add_argument("--keep-open", action="store_true", help="keep game running interactively on success")
     args = parser.parse_args()
 
     polymc_home = Path(args.polymc_home).expanduser()
@@ -494,18 +495,19 @@ def main() -> int:
                 break
             time.sleep(0.5)
     finally:
-        if process.poll() is None:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
+        if not (verdict == "PASS" and args.keep_open):
+            if process.poll() is None:
                 try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
                 except ProcessLookupError:
                     pass
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
         # Give the game a moment to flush its crash report.
         collected += game_tail.poll()
         collected += stdout_tail.poll()
@@ -513,7 +515,10 @@ def main() -> int:
     print()
     print("=" * 68)
     if verdict == "PASS":
-        print(f"RESULT: PASS - reached the main menu ({reason})")
+        if args.keep_open:
+            print(f"RESULT: PASS - reached the main menu ({reason}). Game is running (PID: {process.pid})!")
+        else:
+            print(f"RESULT: PASS - reached the main menu ({reason})")
         print(f"full log : {latest_log}")
         return 0
 
